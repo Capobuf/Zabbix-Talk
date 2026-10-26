@@ -30,7 +30,7 @@ if [[ -e $unit || -L $unit ]]; then
     [[ ! -L $unit ]] && head -1 "$unit" | grep -qx '# Managed by Zabbix Talk scripts/install.sh' \
         || fail "unità systemd preesistente non gestita da questo installer."
 fi
-for file in "$repo/frontend/Module.php" "$repo/frontend/actions/Overview.php" "$repo/frontend/views/zabbix.talk.overview.php"; do
+for file in "$repo/frontend/Module.php" "$repo"/frontend/actions/*.php "$repo"/frontend/includes/*.php "$repo"/frontend/views/*.php; do
     php -l "$file"
 done
 python3 - "$repo" <<'PY'
@@ -50,9 +50,9 @@ fi
     || fail "l'utenza zabbix-talk esistente deve essere non privilegiata e senza login."
 getent group zabbix-talk >/dev/null || fail "gruppo zabbix-talk mancante."
 chown -R "$owner:$(id -gn "$owner")" "$repo"
-chmod 0755 "$repo" "$repo/bridge" "$repo/frontend" "$repo/frontend/actions" "$repo/frontend/views"
+chmod 0755 "$repo" "$repo/bridge" "$repo/frontend" "$repo/frontend/actions" "$repo/frontend/views" "$repo/frontend/includes"
 chmod 0644 "$repo/bridge/server.py" "$repo/frontend/manifest.json" \
-    "$repo/frontend/Module.php" "$repo/frontend/actions/Overview.php" "$repo/frontend/views/zabbix.talk.overview.php"
+    "$repo/frontend/Module.php" "$repo"/frontend/actions/*.php "$repo"/frontend/includes/*.php "$repo"/frontend/views/*.php
 chmod 0700 "$repo/.git"
 install -d -o root -g zabbix-talk -m 0750 /etc/zabbix-talk
 install -d -o zabbix-talk -g zabbix-talk -m 0750 /var/lib/zabbix-talk
@@ -70,5 +70,8 @@ if ! curl --noproxy '*' --fail --silent --show-error --retry 5 --retry-connrefus
     journalctl -u zabbix-talk.service -n 20 --no-pager
     fail "bridge non disponibile; consultare il README per debug e rollback."
 fi
+runuser -u www-data -- curl --unix-socket /run/zabbix-talk/control.sock --noproxy '*' \
+    --fail --silent --output /dev/null http://localhost/status \
+    || fail "www-data non può raggiungere il socket di controllo."
 systemctl is-active zabbix-talk.service
 echo "Installazione aggiornata. In Zabbix: Administration → General → Modules → Scan directory; abilita Zabbix Talk."
