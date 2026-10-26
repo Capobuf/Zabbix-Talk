@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Zabbix Talk — Demo UI/UX indicativa (non vincolante)</title>
+  <meta name="description" content="Demo indicativa per documentare flussi e struttura UI/UX di Zabbix Talk. Non rappresenta una specifica grafica vincolante né codice del modulo Zabbix.">
+  <!--
+    Zabbix Talk — Documento visivo di riferimento (26 ottobre 2026).
+    Questa demo è indicativa: orienta struttura, flussi e contenuti UI/UX.
+    Non richiede riproduzione pixel-perfect e non costituisce codice eseguibile
+    nel frontend Zabbix. Per la realizzazione usare il sistema di moduli,
+    i componenti nativi e i permessi della versione Zabbix effettiva.
+    Dati, bot, messaggi e operazioni sono simulati.
+  -->
+  <style>
+    :root{font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;color:#253447;background:#f5f7fa;font-size:14px;font-synthesis:none}
+    *{box-sizing:border-box}
+    body{margin:0}
+    button,input,select{font:inherit}
+    button{cursor:pointer}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    .app{min-height:100vh;display:flex}
+    .sidebar{background:#18283c;color:#b7c6d8;width:235px;flex:0 0 235px;display:flex;flex-direction:column;min-height:100vh}
+    .brand{height:77px;display:flex;align-items:center;gap:12px;padding:0 20px;border-bottom:1px solid #314158}
+    .brand-icon{background:#da4c50;color:white;font-size:23px;font-weight:900;border-radius:7px;width:33px;height:33px;display:grid;place-items:center}
+    .brand strong{display:block;letter-spacing:1px;font-size:16px;color:#fff}.brand small{font-size:10px;letter-spacing:1px;color:#97adc5}
+    .navlabel{padding:25px 18px 9px;color:#7f96b0;font-weight:800;letter-spacing:1.1px;font-size:10px;text-transform:uppercase}
+    .navitem{width:calc(100% - 18px);margin:2px 9px;padding:11px 12px;border:0;background:none;color:#adbed2;text-align:left;border-radius:7px;display:flex;align-items:center;gap:12px;font-size:13px}
+    .navitem:hover{background:#25384f;color:#fff}.navitem.active{background:#2d4a67;color:#fff;font-weight:650;box-shadow:inset 3px 0 #69b4fc}
+    .navicon{width:19px;text-align:center;font-size:16px;color:#9fc0df}
+    .nav-sub{border-top:1px solid #314158;margin:20px 16px 0}
+    .navfooter{margin-top:auto;padding:20px 17px;color:#8fa3b9;font-size:11px;line-height:1.7;border-top:1px solid #314158}
+    .main{min-width:0;flex:1}
+    .topbar{height:60px;background:#fff;border-bottom:1px solid #e1e7ee;display:flex;align-items:center;justify-content:space-between;padding:0 28px;gap:15px}
+    .topbar .trail{color:#7a8c9e;font-size:12px}.topbar strong{color:#223348}.avatar{width:29px;height:29px;border-radius:50%;display:grid;place-items:center;background:#e1ebf5;color:#3b5b77;font-size:11px;font-weight:800}
+    .topright{display:flex;align-items:center;gap:12px;color:#768797;font-size:12px}
+    .content{max-width:1490px;margin:0 auto;padding:28px 30px 50px}
+    .page{display:none}.page.active{display:block}
+    .heading{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:23px}
+    h1{font-size:25px;letter-spacing:-.55px;margin:0 0 6px;font-weight:750;color:#203044}
+    h2{font-size:16px;margin:0 0 5px;font-weight:740;color:#23334a}
+    h3{font-size:14px;margin:0 0 5px}
+    p{line-height:1.55;margin:0;color:#708194}
+    .eyebrow{font-size:11px;color:#7c8da0;margin-bottom:5px;text-transform:uppercase;font-weight:800;letter-spacing:1px}
+    .heading-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .btn{border:1px solid #ccd8e3;background:#fff;color:#314863;border-radius:6px;padding:9px 13px;font-weight:650;font-size:12px;white-space:nowrap}
+    .btn:hover{background:#f3f8fd;border-color:#adc6dc}.btn.primary{background:#2678b9;border-color:#2678b9;color:white}.btn.primary:hover{background:#1769ac}
+    .btn.danger{color:#bb4651;border-color:#e5b5ba}.btn.small{padding:5px 9px}.btn.ghost{border-color:transparent;background:transparent}
+    .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:13px;margin-bottom:18px}
+    .stat{background:white;border:1px solid #e0e8f0;border-radius:9px;padding:17px 18px}
+    .stathead{display:flex;align-items:center;justify-content:space-between;color:#74859a;font-size:12px}
+    .statnum{font-size:24px;font-weight:750;margin-top:9px;letter-spacing:-.6px}
+    .statdesc{color:#8b9aa9;font-size:11px;margin-top:3px}
+    .pill{display:inline-flex;align-items:center;gap:5px;border-radius:20px;padding:4px 8px;font-size:11px;font-weight:700;white-space:nowrap}
+    .pill.green{color:#177c58;background:#e4f6ee}.pill.orange{color:#a46a14;background:#fff2d9}.pill.red{color:#bf3b46;background:#fcebed}.pill.blue{color:#346c9c;background:#eaf3fb}.pill.gray{color:#78889a;background:#edf1f4}
+    .dot{height:7px;width:7px;background:currentColor;border-radius:100%;display:inline-block}
+    .grid-2{display:grid;grid-template-columns:1.4fr 1fr;gap:17px}
+    .grid-settings{display:grid;grid-template-columns:1fr 1fr;gap:17px}
+    .card{background:#fff;border:1px solid #e0e8f0;border-radius:9px;overflow:hidden;margin-bottom:16px}
+    .cardhead{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:18px 20px;border-bottom:1px solid #edf1f5}
+    .cardhead p{font-size:12px}.cardbody{padding:20px}
+    .tablewrap{overflow:auto}
+    table{width:100%;border-collapse:collapse;text-align:left;font-size:12px;min-width:490px}
+    th{color:#8494a6;font-size:10px;font-weight:800;letter-spacing:.55px;text-transform:uppercase;background:#f9fbfd}
+    td,th{padding:13px 15px;border-bottom:1px solid #edf1f6;vertical-align:middle}
+    tr:last-child td{border-bottom:none}
+    td strong{display:block;font-size:12px;color:#314459}td small{display:block;color:#8595a6;font-size:11px;margin-top:3px}
+    .link{border:0;background:none;color:#2678b9;font-weight:650;padding:3px 0;font-size:12px}
+    .info-line{display:flex;align-items:flex-start;gap:10px;padding:12px 14px;background:#f2f7fc;border:1px solid #dceaf8;border-radius:7px;color:#537393;font-size:12px;line-height:1.5}
+    .warning-line{background:#fff8eb;border-color:#f2dfbd;color:#865d22}
+    .tg{border:1px solid #dce6ef;background:#eaf1f6;padding:20px;border-radius:8px}
+    .tgmeta{display:flex;justify-content:space-between;color:#7b8d9e;font-size:11px;margin-bottom:12px}
+    .tgcard{background:white;border-radius:9px;padding:16px;box-shadow:0 2px 9px #334e6812}
+    .tgtitle{display:flex;justify-content:space-between;gap:8px;align-items:center;font-weight:750;font-size:15px;color:#263448}
+    .tgsub{font-size:12px;color:#76889c;margin-top:4px}.tgdetail{font-size:12px;color:#485f73;margin-top:13px;line-height:1.75;padding-top:10px;border-top:1px solid #e8edf2}
+    .tgdetail b{color:#26394f;font-weight:650}.tgbuttons{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:13px}
+    .tgbuttons button{border:0;border-radius:5px;background:#e7f1fa;color:#2371af;font-size:11px;font-weight:650;padding:8px 3px}
+    .tgbuttons button:hover{background:#d5e9f8}
+    .tgfoot{font-size:11px;color:#8294a5;margin-top:12px;text-align:right}
+    .input,.select{width:100%;border:1px solid #cbd8e3;border-radius:6px;background:white;color:#27384a;padding:10px 12px;outline:0;min-height:38px}
+    .input:focus,.select:focus{border-color:#3483c3;box-shadow:0 0 0 2px #cde5f8}
+    .field{margin-bottom:15px}.field label{display:block;color:#43586e;font-weight:650;font-size:12px;margin-bottom:6px}.field small{display:block;color:#8596a6;font-size:11px;margin-top:5px}
+    .row{display:flex;align-items:center;gap:10px}.between{justify-content:space-between}.stack{display:flex;flex-direction:column;gap:11px}.inline{display:flex;flex-wrap:wrap;align-items:center;gap:9px}
+    .subnav{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid #e1e8f0;margin-bottom:16px}
+    .tab{padding:12px 16px;border:0;border-bottom:2px solid transparent;color:#72859a;background:transparent;font-weight:650;font-size:12px}
+    .tab.active{color:#2577b8;border-bottom-color:#2577b8}
+    .switch{appearance:none;width:34px;height:19px;border-radius:20px;background:#bfc9d3;position:relative;cursor:pointer;transition:background .15s;vertical-align:middle;flex:none}
+    .switch:checked{background:#2783c6}.switch:before{content:"";position:absolute;left:3px;top:3px;width:13px;height:13px;border-radius:50%;background:white;transition:transform .15s}.switch:checked:before{transform:translateX(15px)}
+    .toggle-row{display:flex;align-items:center;justify-content:space-between;padding:13px 0;border-bottom:1px solid #edf1f5;gap:12px}.toggle-row:last-child{border-bottom:0}
+    .checkchips{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+    .checkchips label{display:flex;align-items:center;gap:6px;border:1px solid #e0e7ee;padding:8px 10px;border-radius:6px;font-size:12px;color:#485c70;background:#fbfcfe}
+    .checkchips input{accent-color:#2678b9}
+    .twofields{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .sevrow{display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid #edf1f5;gap:8px}
+    .sevrow:last-child{border-bottom:0}.sevname{font-size:12px;font-weight:650}.sevrow select{min-width:195px;width:auto;padding:7px 9px;font-size:11px}
+    .kbd{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;border:1px solid #dfe6ed;background:#f7f9fb;border-radius:4px;padding:2px 5px;font-size:11px}
+    .setup-steps{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px}.setup-steps div{border:1px solid #e0e8ef;background:#fff;border-radius:7px;padding:11px;font-size:11px;color:#688099}.setup-steps .ok{color:#197d59;border-color:#ceebdf;background:#f2fbf6}
+    .overlay{display:none;position:fixed;inset:0;background:#122137a8;align-items:center;justify-content:center;z-index:20;padding:16px}
+    .overlay.show{display:flex}
+    .modal{background:#fff;width:min(100%,530px);border-radius:12px;box-shadow:0 18px 75px #0c172d38;overflow:hidden;max-height:min(90vh,850px);display:flex;flex-direction:column}
+    .modal.wide{width:min(100%,690px)}
+    .modalheader{display:flex;justify-content:space-between;align-items:center;padding:20px 22px;border-bottom:1px solid #edf1f5;gap:10px}.modalheader h2{margin:0}.x{border:0;background:transparent;color:#8292a3;font-size:24px;line-height:1}
+    .modalcontent{padding:22px;overflow:auto}.modalfooter{display:flex;justify-content:flex-end;gap:8px;padding:16px 22px;border-top:1px solid #edf1f5}
+    .wizardsteps{display:flex;gap:6px;margin-bottom:18px}.wizardsteps span{height:5px;background:#e6ecf2;border-radius:8px;flex:1}.wizardsteps span.on{background:#277ec0}
+    .empty{padding:40px 20px;text-align:center;color:#8293a3}.empty strong{display:block;color:#3b5267;margin-bottom:6px}
+    .toast{position:fixed;bottom:24px;right:24px;z-index:40;background:#24384d;color:#fff;padding:13px 18px;border-radius:8px;font-size:12px;max-width:360px;box-shadow:0 8px 32px #1221383f;opacity:0;transform:translateY(15px);transition:all .2s;pointer-events:none}.toast.show{opacity:1;transform:translateY(0)}
+    .reference-note{border:1px solid #bed7eb;background:#eef6fc;padding:12px 15px;border-radius:8px;margin-bottom:21px;color:#365d7e;line-height:1.55;font-size:12px}
+    .reference-note strong{color:#274c6b}
+    .mobilemenu{display:none;border:0;background:transparent;font-size:22px;color:#415b71}
+    @media (max-width:1100px){.stats{grid-template-columns:repeat(2,1fr)}.grid-2{grid-template-columns:1fr}.sidebar{width:205px;flex-basis:205px}.content{padding:22px}}
+    @media (max-width:740px){.sidebar{display:none;position:fixed;z-index:15;min-height:100%;height:100%;overflow:auto}.sidebar.open{display:flex}.mobilemenu{display:block}.content{padding:17px}.topbar{padding:0 16px}.stats{grid-template-columns:1fr 1fr}.grid-settings,.twofields{grid-template-columns:1fr}.heading{flex-direction:column}.cardhead{align-items:flex-start;flex-direction:column}.setup-steps{grid-template-columns:1fr 1fr}}
+    @media (max-width:420px){.stats{grid-template-columns:1fr}.topright .user-label{display:none}.content{padding:13px}.tg{padding:10px}}
+  </style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand"><div class="brand-icon">Z</div><div><strong>ZABBIX</strong><small>MONITORING PLATFORM</small></div></div>
+    <div class="navlabel">Navigazione Zabbix</div>
+    <button class="navitem" onclick="notify('Voce nativa Zabbix: fuori dalla demo')"><span class="navicon">◫</span> Dashboard</button>
+    <button class="navitem" onclick="notify('Voce nativa Zabbix: fuori dalla demo')"><span class="navicon">≋</span> Monitoring</button>
+    <button class="navitem" onclick="notify('Voce nativa Zabbix: fuori dalla demo')"><span class="navicon">▦</span> Data collection</button>
+    <button class="navitem" onclick="notify('Voce nativa Zabbix: fuori dalla demo')"><span class="navicon">♢</span> Alerts</button>
+    <div class="nav-sub"></div>
+    <div class="navlabel">Modulo · Zabbix Talk</div>
+    <button class="navitem active" data-page="home" onclick="go('home')"><span class="navicon">▤</span> Panoramica</button>
+    <button class="navitem" data-page="dest" onclick="go('dest')"><span class="navicon">◎</span> Destinazioni</button>
+    <button class="navitem" data-page="notif" onclick="go('notif')"><span class="navicon">♧</span> Notifiche</button>
+    <button class="navitem" data-page="ops" onclick="go('ops')"><span class="navicon">✓</span> Controlli e attività</button>
+    <button class="navitem" data-page="settings" onclick="go('settings')"><span class="navicon">⚙</span> Impostazioni</button>
+    <div class="navfooter">Zabbix Talk · Prototipo UI/UX<br>Contenuti e azioni simulati</div>
+  </aside>
+  <main class="main">
+    <header class="topbar"><div class="row"><button class="mobilemenu" onclick="document.getElementById('sidebar').classList.toggle('open')">☰</button><span class="trail">Zabbix <span style="margin:0 9px">/</span> <strong id="breadcrumb">Zabbix Talk / Panoramica</strong></span></div><div class="topright"><span class="pill blue">DEMO</span><span class="user-label">Admin</span><div class="avatar">AD</div></div></header>
+    <div class="content">
+      <div class="reference-note" role="note"><strong>Demo UI/UX indicativa — non vincolante.</strong> Questo HTML serve a illustrare struttura, navigazione, flussi e informazioni previste per Zabbix Talk. La versione definitiva non deve riprodurre esattamente colori, layout, pulsanti o interazioni: utilizzerà preferibilmente i componenti nativi del frontend Zabbix. Tutti i dati e i comandi qui mostrati sono simulati; nessuna connessione reale a Zabbix o Telegram.</div>
+      <section class="page active" id="page-home">
+        <div class="heading"><div><div class="eyebrow">Modulo Zabbix Talk</div><h1>Panoramica</h1><p>Controllo rapido del collegamento con Telegram e delle notifiche.</p></div><div class="heading-actions"><button class="btn" onclick="openWizard(0)">Configurazione guidata</button><button class="btn primary" onclick="go('dest')">Gestisci destinazioni</button></div></div>
+        <div class="stats">
+          <div class="stat"><div class="stathead">Bot Telegram <span class="pill green"><i class="dot"></i> Online</span></div><div class="statnum" style="font-size:18px">@ZabbixTalkBot</div><div class="statdesc">Ultima verifica: pochi secondi fa</div></div>
+          <div class="stat"><div class="stathead">Bridge <span class="pill green"><i class="dot"></i> Attivo</span></div><div class="statnum" style="font-size:18px">Servizio avviato</div><div class="statdesc">Connessione locale · 127.0.0.1</div></div>
+          <div class="stat"><div class="stathead">Messaggi inviati oggi</div><div class="statnum">42</div><div class="statdesc">Ultimo invio riuscito alle 14:32</div></div>
+          <div class="stat"><div class="stathead">Conflitti di routing</div><div class="statnum" id="conflict-stat" style="color:#cb8b28">1</div><div class="statdesc">Host interessati: 2 · <button class="link" onclick="go('dest')">Esamina</button></div></div>
+        </div>
+        <div class="grid-2">
+          <div>
+            <div class="card"><div class="cardhead"><div><h2>Attività recente</h2><p>Eventi dimostrativi in ordine cronologico.</p></div><button class="btn small" onclick="notify('Stato aggiornato (simulazione)')">Aggiorna</button></div>
+              <div class="tablewrap"><table><thead><tr><th>Ora</th><th>Host / evento</th><th>Stato</th><th>Destinazione</th></tr></thead><tbody>
+                <tr><td>14:32</td><td><strong>SRV-DC01</strong><small>Agent non raggiungibile</small></td><td><span class="pill red">Problem</span></td><td>Alfa / Server</td></tr>
+                <tr><td>14:20</td><td><strong>SW-CORE01</strong><small>Uplink ripristinato</small></td><td><span class="pill green">Recovery</span></td><td>Alfa / Rete</td></tr>
+                <tr><td>13:54</td><td><strong>UPS-01</strong><small>Alimentazione su batteria</small></td><td><span class="pill orange">Warning</span></td><td>Beta / Generale</td></tr>
+                <tr><td>13:22</td><td><strong>SW-EDGE03</strong><small>Controllo escluso da Marco</small></td><td><span class="pill gray">Disabilitato</span></td><td>Alfa / Rete</td></tr>
+              </tbody></table></div>
+            </div>
+            <div class="card"><div class="cardhead"><div><h2>Configurazione</h2><p>Verifiche principali dell'installazione.</p></div></div><div class="cardbody"><div class="setup-steps"><div class="ok">✓ Bot verificato</div><div class="ok">✓ Bridge attivo</div><div class="ok">✓ Media Type creato</div><div class="ok">✓ Utente tecnico</div><div class="ok">✓ Action attive</div><div style="color:#a66b19;border-color:#eed9af;background:#fffaef">! 1 conflitto routing</div></div><div class="info-line">La presenza di host senza destinazione Telegram non è considerata un errore. Riceveranno notifiche soltanto gli host associati.</div></div></div>
+          </div>
+          <div>
+            <div class="card"><div class="cardhead"><div><h2>Anteprima Telegram</h2><p>Come appare un incidente ai tecnici.</p></div><button class="btn small" onclick="openModal('preview')">Apri dettagli</button></div><div class="cardbody" style="padding:14px"><div class="tg"><div class="tgmeta"><span>Monitoraggio MSP · Cliente Alfa / Server</span><span>14:32</span></div><div class="tgcard"><div class="tgtitle">SRV-DC01 <span class="pill red" id="telegram-status">High · Problem</span></div><div class="tgsub">Agent non raggiungibile</div><div class="tgdetail">Host: <b>SRV-DC01</b><br>IP: <b>192.168.10.5</b><br>Inizio: <b>14:32</b><br>ACK: <b id="ack-status">Non riconosciuto</b></div><div class="tgbuttons"><button onclick="openModal('preview')">Dettagli</button><button onclick="ackEvent()" id="ack-button">Riconosci</button><button onclick="openModal('snooze')">Silenzia topic</button><button onclick="openModal('actions')">Altre azioni</button></div></div><div class="tgfoot">Anteprima grafica · non inviata a Telegram</div></div></div></div>
+          </div>
+        </div>
+      </section>
+      <section class="page" id="page-dest">
+        <div class="heading"><div><div class="eyebrow">Gruppi, chat e topic</div><h1>Destinazioni</h1><p>Associa i gruppi host Zabbix ai topic Telegram, senza creare categorie obbligatorie.</p></div><button class="btn primary" onclick="openModal('add')">+ Nuova associazione</button></div>
+        <div class="info-line" style="margin-bottom:18px">Un host con più destinazioni incompatibili viene segnalato come conflitto: nessuna destinazione viene scelta automaticamente.</div>
+        <div class="card"><div class="cardhead"><div><h2>Associazioni attive</h2><p>I gruppi host possono condividere una destinazione.</p></div><span class="pill blue" id="routes-count">3 associazioni</span></div><div class="tablewrap"><table><thead><tr><th>Gruppo host Zabbix</th><th>Gruppo Telegram</th><th>Topic</th><th>Host</th><th>Stato</th><th></th></tr></thead><tbody id="routes-tbody">
+        <tr><td><strong>Cliente Alfa / Servers</strong></td><td>Monitoraggio MSP</td><td>Alfa · Server</td><td>12</td><td><span class="pill green">Attiva</span></td><td><button class="link" onclick="openModal('route')">Visualizza</button></td></tr>
+        <tr><td><strong>Cliente Alfa / Network</strong></td><td>Monitoraggio MSP</td><td>Alfa · Rete</td><td>18</td><td><span class="pill green">Attiva</span></td><td><button class="link" onclick="openModal('route')">Visualizza</button></td></tr>
+        <tr><td><strong>Cliente Beta</strong></td><td>Monitoraggio Beta</td><td>Generale</td><td>9</td><td><span class="pill green">Attiva</span></td><td><button class="link" onclick="openModal('route')">Visualizza</button></td></tr>
+        </tbody></table></div></div>
+        <div class="card"><div class="cardhead"><div><h2>Conflitti da risolvere</h2><p>Le notifiche degli host coinvolti sono sospese fino alla correzione.</p></div><span class="pill orange">1 conflitto</span></div><div class="tablewrap"><table><thead><tr><th>Host</th><th>Gruppi corrispondenti</th><th>Destinazioni</th><th></th></tr></thead><tbody><tr><td><strong>SRV-APP02, SRV-APP03</strong><small>2 host coinvolti</small></td><td>Cliente Alfa / Servers<br>Infrastruttura condivisa</td><td>Alfa · Server / MSP · Generale</td><td><button class="btn small" onclick="openModal('conflict')">Esamina</button></td></tr></tbody></table></div></div>
+      </section>
+      <section class="page" id="page-notif">
+        <div class="heading"><div><div class="eyebrow">Action native Zabbix</div><h1>Notifiche</h1><p>Una politica generale semplice. Le condizioni sono salvate in Zabbix, non valutate dal bridge.</p></div><button class="btn primary" onclick="notify('Impostazioni salvate nella demo. Nessuna modifica a Zabbix.')">Salva impostazioni</button></div>
+        <div class="grid-2">
+          <div><div class="card"><div class="cardhead"><div><h2>Politica generale</h2><p>Si applica ai gruppi host associati senza eccezioni.</p></div><span class="pill green">Abilitata</span></div><div class="cardbody">
+            <div class="toggle-row"><div><h3>Notifiche sempre attive</h3><p style="font-size:12px">Impostazione iniziale 24 ore su 24, 7 giorni su 7.</p></div><input type="checkbox" class="switch" id="always" checked onchange="scheduleChanged()" aria-label="Notifiche sempre attive"></div>
+            <div id="schedule-fields" style="opacity:.45;pointer-events:none;margin-top:18px"><div class="field"><label>Giorni di notifica</label><div class="checkchips"><label><input type="checkbox" checked> Lun</label><label><input type="checkbox" checked> Mar</label><label><input type="checkbox" checked> Mer</label><label><input type="checkbox" checked> Gio</label><label><input type="checkbox" checked> Ven</label><label><input type="checkbox" checked> Sab</label><label><input type="checkbox" checked> Dom</label></div></div><div class="twofields"><div class="field"><label>Dalle</label><input class="input" type="time" value="09:00"></div><div class="field"><label>Alle</label><input class="input" type="time" value="18:00"></div></div></div>
+            <div class="info-line">Gli orari sono condizioni native delle Action Zabbix. Un problema nato fuori fascia non viene automaticamente notificato quando la fascia riapre.</div>
+            <div class="field" style="margin-top:18px"><label>Severità che generano notifiche</label><div class="checkchips"><label><input type="checkbox"> Not classified</label><label><input type="checkbox"> Information</label><label><input type="checkbox" checked> Warning</label><label><input type="checkbox" checked> Average</label><label><input type="checkbox" checked> High</label><label><input type="checkbox" checked> Disaster</label></div></div>
+          </div></div>
+            <div class="card"><div class="cardhead"><div><h2>Eccezioni per gruppo host</h2><p>Modifica soltanto quando realmente necessario.</p></div><button class="btn small" onclick="openModal('exception')">+ Aggiungi</button></div><div class="tablewrap"><table><thead><tr><th>Gruppo host</th><th>Politica</th><th>Stato</th></tr></thead><tbody><tr><td><strong>Cliente Alfa / Servers</strong></td><td>High e Disaster: 24/7</td><td><span class="pill green">Attiva</span></td></tr><tr><td><strong>Infrastruttura condivisa</strong></td><td>Conflitto con policy Alfa</td><td><span class="pill orange">Da risolvere</span></td></tr></tbody></table></div></div>
+          </div>
+          <div><div class="card"><div class="cardhead"><div><h2>Messaggi di ripristino</h2><p>Default per severità Zabbix.</p></div></div><div class="cardbody" style="padding-top:8px"><div class="sevrow"><span class="sevname">Not classified</span><select class="select"><option>Aggiorna messaggio</option><option>Aggiorna + notifica</option></select></div><div class="sevrow"><span class="sevname">Information</span><select class="select"><option>Aggiorna messaggio</option><option>Aggiorna + notifica</option></select></div><div class="sevrow"><span class="sevname">Warning</span><select class="select"><option>Aggiorna messaggio</option><option>Aggiorna + notifica</option></select></div><div class="sevrow"><span class="sevname">Average</span><select class="select"><option>Aggiorna messaggio</option><option>Aggiorna + notifica</option></select></div><div class="sevrow"><span class="sevname">High</span><select class="select"><option>Aggiorna + notifica</option><option>Aggiorna messaggio</option></select></div><div class="sevrow"><span class="sevname">Disaster</span><select class="select"><option>Aggiorna + notifica</option><option>Aggiorna messaggio</option></select></div></div></div><div class="card"><div class="cardbody"><h2>Anteprima</h2><p style="font-size:12px;margin-bottom:14px">Il recovery High aggiorna il messaggio originale e invia anche un nuovo messaggio Telegram.</p><button class="btn" onclick="go('home')">Vedi esempio di Rich Message</button></div></div></div>
+        </div>
+      </section>
+      <section class="page" id="page-ops">
+        <div class="heading"><div><div class="eyebrow">Gestione operativa</div><h1>Controlli e attività</h1><p>Trigger disabilitati da Telegram, snooze attivi e registro delle operazioni.</p></div><button class="btn" onclick="notify('Elenco aggiornato (simulazione)')">Aggiorna</button></div>
+        <div class="card"><div class="subnav" style="margin:0;padding:0 12px"><button class="tab active" data-op="disabled" onclick="opsTab('disabled')">Controlli esclusi</button><button class="tab" data-op="snoozes" onclick="opsTab('snoozes')">Snooze attivi</button><button class="tab" data-op="audit" onclick="opsTab('audit')">Attività</button></div>
+        <div id="ops-disabled" class="opview"><div class="tablewrap"><table><thead><tr><th>Host / controllo</th><th>Disabilitato da</th><th>Data</th><th>Stato</th><th></th></tr></thead><tbody id="exclusions"><tr><td><strong>SW-EDGE03</strong><small>Velocità porta 13 inferiore a 1 Gbps</small></td><td>Marco (Telegram)</td><td>26 ott, 13:22</td><td><span class="pill orange">Escluso</span></td><td><button class="btn small" onclick="openModal('reactivate')">Riattiva</button></td></tr></tbody></table></div></div>
+        <div id="ops-snoozes" class="opview" style="display:none"><div class="tablewrap"><table><thead><tr><th>Destinazione</th><th>Attivato da</th><th>Scadenza</th><th>Stato</th><th></th></tr></thead><tbody id="snoozes"><tr><td><strong>Monitoraggio MSP / Alfa · Rete</strong></td><td>Luca (Telegram)</td><td>Oggi, 17:30</td><td><span class="pill blue">Silenzioso</span></td><td><button class="btn small" onclick="notify('Snooze annullato (simulazione)')">Annulla</button></td></tr></tbody></table></div></div>
+        <div id="ops-audit" class="opview" style="display:none"><div class="tablewrap"><table><thead><tr><th>Ora</th><th>Operatore</th><th>Operazione</th><th>Esito</th></tr></thead><tbody><tr><td>13:22</td><td>Marco</td><td>Disabilita trigger SW-EDGE03</td><td><span class="pill green">Riuscita</span></td></tr><tr><td>12:04</td><td>Luca</td><td>Snooze topic Alfa · Rete</td><td><span class="pill green">Riuscita</span></td></tr><tr><td>09:14</td><td>Giuseppe</td><td>ACK SRV-APP01</td><td><span class="pill green">Riuscita</span></td></tr></tbody></table></div></div>
+        </div>
+      </section>
+      <section class="page" id="page-settings">
+        <div class="heading"><div><div class="eyebrow">Connessioni e diagnostica</div><h1>Impostazioni</h1><p>Configurazione tecnica essenziale, senza richiedere l'editing manuale di Media Type o Action.</p></div><button class="btn primary" onclick="openWizard(0)">Riapri configurazione guidata</button></div>
+        <div class="grid-settings"><div><div class="card"><div class="cardhead"><div><h2>Bot Telegram</h2><p>Bot dedicato a questa istanza Zabbix.</p></div><span class="pill green">Collegato</span></div><div class="cardbody"><div class="field"><label>Bot</label><input class="input" value="@ZabbixTalkBot" readonly></div><div class="field"><label>Token Telegram</label><input class="input" type="password" value="123456789:DEMO_TOKEN_NOT_REAL" readonly><small>Il token effettivo non deve essere mostrato dopo il salvataggio.</small></div><button class="btn" onclick="notify('Connessione Telegram verificata (simulazione)')">Verifica collegamento</button></div></div></div>
+        <div><div class="card"><div class="cardhead"><div><h2>Bridge locale</h2><p>Servizio di comunicazione e gestione comandi.</p></div><span class="pill green">In esecuzione</span></div><div class="cardbody"><div class="field"><label>Endpoint interno</label><input class="input" value="http://127.0.0.1:8765" readonly></div><div class="field"><label>Servizio</label><input class="input" value="zabbix-talk.service" readonly></div><button class="btn" onclick="notify('Bridge raggiungibile (simulazione)')">Esegui diagnosi</button></div></div></div></div>
+        <div class="card"><div class="cardhead"><div><h2>Risorse Zabbix gestite</h2><p>Informazioni tecniche disponibili, ma non necessarie per le operazioni quotidiane.</p></div></div><div class="tablewrap"><table><thead><tr><th>Risorsa</th><th>Nome</th><th>Stato</th></tr></thead><tbody><tr><td>Media Type</td><td>Zabbix Talk (webhook)</td><td><span class="pill green">Attivo</span></td></tr><tr><td>Utente destinatario</td><td>zabbix-talk-notify</td><td><span class="pill green">Attivo</span></td></tr><tr><td>Action</td><td>Zabbix Talk - Trigger alerts</td><td><span class="pill green">Sincronizzata</span></td></tr></tbody></table></div></div>
+      </section>
+    </div>
+  </main>
+</div>
+<div class="overlay" id="overlay" role="presentation" onclick="if(event.target===this)closeModal()"><div class="modal" id="modal-box" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modalheader"><h2 id="modal-title"></h2><button class="x" aria-label="Chiudi" onclick="closeModal()">×</button></div><div class="modalcontent" id="modal-content"></div><div class="modalfooter" id="modal-footer"></div></div></div>
+<div class="toast" id="toast" role="status"></div>
+<script>
+const pageNames={home:'Panoramica',dest:'Destinazioni',notif:'Notifiche',ops:'Controlli e attività',settings:'Impostazioni'};
+let modalType='',wizardStep=0,routes=3,acked=false,disabledCount=1;
+function go(page){document.querySelectorAll('.page').forEach(x=>x.classList.toggle('active',x.id==='page-'+page));document.querySelectorAll('[data-page]').forEach(x=>x.classList.toggle('active',x.dataset.page===page));document.getElementById('breadcrumb').textContent='Zabbix Talk / '+pageNames[page];document.getElementById('sidebar').classList.remove('open');window.scrollTo({top:0,behavior:'instant'});}
+let toastTimer;
+function notify(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove('show'),3500);}
+function setModal(title,body,footer,wide=false){document.getElementById('modal-title').textContent=title;document.getElementById('modal-content').innerHTML=body;document.getElementById('modal-footer').innerHTML=footer;document.getElementById('modal-box').classList.toggle('wide',wide);document.getElementById('overlay').classList.add('show');}
+function closeModal(){document.getElementById('overlay').classList.remove('show');modalType='';}
+const cancel='<button class="btn" onclick="closeModal()">Annulla</button>';
+function openModal(type){modalType=type;
+  if(type==='add')setModal('Nuova associazione',`<p style="margin-bottom:18px">Associa un gruppo host a una destinazione Telegram. Nessuna categoria viene creata automaticamente.</p><div class="field"><label>Gruppo host Zabbix</label><select class="select" id="addgroup"><option>Cliente Gamma</option><option>Cliente Beta / Network</option><option>Infrastruttura condivisa</option></select></div><div class="field"><label>Gruppo Telegram</label><select class="select" id="addchat"><option>Monitoraggio MSP</option><option>Monitoraggio Beta</option></select></div><div class="field"><label>Topic</label><select class="select" id="addtopic"><option>Generale</option><option>Alfa · Server</option><option>Alfa · Rete</option><option>Nuovo topic...</option></select></div><div class="info-line">Prima del salvataggio reale saranno verificati gli host coinvolti e gli eventuali conflitti.</div>`,cancel+'<button class="btn primary" onclick="addRoute()">Crea associazione</button>');
+  if(type==='route')setModal('Dettaglio associazione',`<p>Gli host appartenenti al gruppo selezionato inviano le notifiche alla destinazione scelta.</p><div class="field" style="margin-top:18px"><label>Gruppo Telegram</label><input class="input" value="Monitoraggio MSP" readonly></div><div class="field"><label>Topic</label><input class="input" value="Alfa · Server" readonly></div><div class="info-line">Modificare una destinazione non sposta lo storico degli incidenti.</div>`, '<button class="btn primary" onclick="closeModal()">Chiudi</button>');
+  if(type==='conflict')setModal('Conflitto di routing',`<div class="info-line warning-line" style="margin-bottom:16px">Due host appartengono a gruppi associati a destinazioni incompatibili. Le notifiche restano bloccate fino alla correzione.</div><div class="field"><label>Host interessati</label><input class="input" value="SRV-APP02, SRV-APP03" readonly></div><div class="field"><label>Destinazioni candidate</label><input class="input" value="Alfa · Server / MSP · Generale" readonly></div><p>Puoi correggere l'appartenenza ai gruppi Zabbix o modificare un'associazione.</p>`, '<button class="btn primary" onclick="closeModal()">Ho capito</button>');
+  if(type==='preview')setModal('Dettagli del problema',`<div class="row between" style="margin-bottom:14px"><strong>SRV-DC01 · Agent non raggiungibile</strong><span class="pill red">High</span></div><div class="field"><label>Host</label><input class="input" readonly value="SRV-DC01 · 192.168.10.5"></div><div class="field"><label>Evento Zabbix</label><input class="input" readonly value="Problem · iniziato alle 14:32"></div><div class="info-line">Dati simulati. In produzione i valori aggiornati vengono letti dalle API Zabbix.</div>`, '<button class="btn primary" onclick="closeModal()">Chiudi</button>');
+  if(type==='actions')setModal('Altre azioni',`<div class="stack"><button class="btn" onclick="openModal('disable')">Disabilita questo trigger in Zabbix</button><button class="btn" onclick="notify('Comando informazioni simulato');closeModal()">Informazioni host aggiornate</button></div><p style="font-size:12px;margin-top:16px">La disabilitazione agisce sul controllo Zabbix, non soltanto sulle notifiche Telegram.</p>`, '<button class="btn" onclick="closeModal()">Chiudi</button>');
+  if(type==='disable')setModal('Disabilita questo controllo?',`<div class="info-line warning-line" style="margin-bottom:16px">Questa operazione disabilita realmente il trigger in Zabbix e non sarà più generato questo specifico problema. Gli altri controlli restano attivi.</div><p><b>Host:</b> SRV-DC01<br><b>Trigger:</b> Agent non raggiungibile</p>`,cancel+'<button class="btn danger" onclick="disableTrigger()">Conferma esclusione</button>');
+  if(type==='reactivate')setModal('Riattiva il controllo?',`<p><b>SW-EDGE03</b> · Velocità porta 13 inferiore a 1 Gbps.</p><p style="margin-top:12px">Il trigger tornerà a essere valutato da Zabbix.</p>`,cancel+'<button class="btn primary" onclick="reactivate()">Riattiva controllo</button>');
+  if(type==='snooze')setModal('Silenzia il topic',`<p style="margin-bottom:16px">Tutte le nuove notifiche del topic <b>Alfa · Server</b> saranno silenziate per la durata scelta. Alla scadenza, i problemi ancora aperti potranno essere rinotificati.</p><div class="field"><label>Durata</label><select class="select" id="snoozeduration"><option>30 minuti</option><option>2 ore</option><option>8 ore</option><option>24 ore</option></select></div>`,cancel+'<button class="btn primary" onclick="snoozeTopic()">Attiva snooze</button>');
+  if(type==='exception')setModal('Nuova eccezione',`<p style="margin-bottom:16px">Le eccezioni sono opzionali. Se la combinazione delle regole crea sovrapposizioni incompatibili, la configurazione viene segnalata come conflitto.</p><div class="field"><label>Gruppo host</label><select class="select"><option>Cliente Beta</option><option>Cliente Gamma</option></select></div><div class="field"><label>Fascia</label><select class="select"><option>Eredita politica generale</option><option>24/7</option></select></div>`,cancel+'<button class="btn primary" onclick="notify(\'Eccezione aggiunta nella demo\');closeModal()">Aggiungi</button>');
+}
+function addRoute(){const group=document.getElementById('addgroup').value,chat=document.getElementById('addchat').value,topic=document.getElementById('addtopic').value;const tr=document.createElement('tr');const values=[group,chat,topic,4];values.forEach((v,i)=>{const td=document.createElement('td');if(i===0){const b=document.createElement('strong');b.textContent=v;td.appendChild(b)}else td.textContent=v;tr.appendChild(td)});const status=document.createElement('td');status.innerHTML='<span class="pill green">Demo</span>';tr.appendChild(status);const btn=document.createElement('td');btn.innerHTML='<button class="link" onclick="openModal(\'route\')">Visualizza</button>';tr.appendChild(btn);document.getElementById('routes-tbody').appendChild(tr);routes++;document.getElementById('routes-count').textContent=routes+' associazioni';closeModal();notify('Associazione aggiunta alla demo (non salvata su Zabbix)');}
+function ackEvent(){acked=true;document.getElementById('ack-status').textContent='Admin (demo)';document.getElementById('ack-button').textContent='Riconosciuto';notify('Evento riconosciuto nella demo');}
+function disableTrigger(){closeModal();document.getElementById('telegram-status').textContent='Controllo escluso';document.getElementById('telegram-status').className='pill orange';notify('Trigger disabilitato nella demo. Nessuna operazione reale.');}
+function snoozeTopic(){const duration=document.getElementById('snoozeduration').value;closeModal();notify('Snooze del topic attivato per '+duration+' (simulazione)');}
+function reactivate(){document.getElementById('exclusions').innerHTML='<tr><td colspan="5"><div class="empty"><strong>Nessun controllo escluso</strong>Tutti i controlli della demo sono attivi.</div></td></tr>';closeModal();notify('Controllo riattivato nella demo');}
+function scheduleChanged(){const active=document.getElementById('always').checked;const wrap=document.getElementById('schedule-fields');wrap.style.opacity=active?'.45':'1';wrap.style.pointerEvents=active?'none':'auto';notify(active?'Notifiche 24/7':'Fascia oraria personalizzabile');}
+function opsTab(type){document.querySelectorAll('.opview').forEach(x=>x.style.display=x.id==='ops-'+type?'block':'none');document.querySelectorAll('[data-op]').forEach(x=>x.classList.toggle('active',x.dataset.op===type));}
+const wizardData=[
+ ['Verifica ambiente','Controllo dei requisiti minimi della VM, del frontend Zabbix e del bridge.','✓ Zabbix Server e frontend sulla stessa VM<br>✓ Servizio bridge disponibile<br>✓ Nessuna porta Telegram da aprire in ingresso'],
+ ['Collega il bot','Crea il bot con BotFather e inserisci il token in modo protetto.','Bot dedicato a questa installazione di Zabbix. Verifica delle API Telegram e dei permessi.'],
+ ['Destinazioni','Seleziona il gruppo Telegram e i topic, già esistenti o nuovi.','Il bot può riconoscere una destinazione a seguito di un comando eseguito direttamente nel gruppo/topic.'],
+ ['Gruppi host','Associa i gruppi host Zabbix alle destinazioni desiderate.','Anteprima degli host inclusi e dei conflitti. Gli host senza associazione non ricevono notifiche.'],
+ ['Notifiche','Configura la politica generale, inizialmente sempre attiva.','Action native Zabbix, recovery High/Disaster con messaggio aggiuntivo, snooze condiviso sul topic.'],
+ ['Riepilogo e attivazione','Conferma le risorse da creare e attiva Zabbix Talk.','Media Type, utente destinatario e Action saranno creati soltanto al termine del wizard.']
+];
+function openWizard(step){modalType='wizard';wizardStep=step;renderWizard();}
+function renderWizard(){const w=wizardData[wizardStep],bar='<div class="wizardsteps">'+wizardData.map((_,i)=>'<span class="'+(i<=wizardStep?'on':'')+'"></span>').join('')+'</div>';let body=bar+'<div class="eyebrow">Passaggio '+(wizardStep+1)+' di '+wizardData.length+'</div><h2 style="font-size:18px;margin-bottom:8px">'+w[0]+'</h2><p style="margin-bottom:18px">'+w[1]+'</p><div class="info-line" style="display:block">'+w[2]+'</div>';if(wizardStep===1)body+='<div class="field" style="margin-top:18px"><label>Token del bot</label><input type="password" class="input" placeholder="Inserisci il token Telegram (demo)"></div>';if(wizardStep===3)body+='<div class="field" style="margin-top:18px"><label>Gruppo host</label><select class="select"><option>Cliente Alfa / Network</option><option>Cliente Alfa / Servers</option><option>Cliente Beta</option></select></div>';let footer='<button class="btn" onclick="'+(wizardStep===0?'closeModal()':'openWizard('+(wizardStep-1)+')')+'">'+(wizardStep===0?'Chiudi':'Indietro')+'</button><button class="btn primary" onclick="'+(wizardStep===wizardData.length-1?'closeModal();notify(\'Configurazione guidata completata nella demo\')':'openWizard('+(wizardStep+1)+')')+'">'+(wizardStep===wizardData.length-1?'Completa demo':'Continua')+'</button>';setModal('Configurazione guidata',body,footer,true);}
+document.addEventListener('keydown',event=>{if(event.key==='Escape')closeModal()});
+</script>
+</body>
+</html>
