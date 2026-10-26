@@ -79,6 +79,11 @@ class Bridge:
                        'id TEXT PRIMARY KEY, kind TEXT, eventid TEXT, host TEXT, '
                        'chat_id TEXT, thread_id TEXT, message_id INTEGER, '
                        'status TEXT, detail TEXT, updated_at INTEGER)')
+            columns = {row[1] for row in db.execute('PRAGMA table_info(receipts)')}
+            for name, definition in [('hostid', 'TEXT'), ('bot_id', 'TEXT'), ('payload', 'TEXT'),
+                                     ('recovery_eventid', 'TEXT'), ('recovery_message_id', 'INTEGER')]:
+                if name not in columns:
+                    db.execute(f'ALTER TABLE receipts ADD COLUMN {name} {definition}')
 
     def receipts(self):
         return sqlite3.connect(self.receipts_path)
@@ -105,8 +110,8 @@ class Bridge:
 
     def notify(self, data):
         kind = data.get('kind')
-        if kind not in ('problem', 'transport') or str(data.get('event_value')) != '1':
-            raise BridgeError('Sono supportati soltanto eventi PROBLEM e test del trasporto.')
+        if kind not in ('problem', 'recovery', 'transport') or str(data.get('event_value')) != ('0' if kind == 'recovery' else '1'):
+            raise BridgeError('Tipo o valore evento PROBLEM/RECOVERY non valido.')
         for field in ('eventid', 'hostid', 'bot_id'):
             if not re.fullmatch(r'[1-9][0-9]{0,19}', str(data.get(field, ''))):
                 raise BridgeError('Identificativi evento, host o bot non validi.')
@@ -121,10 +126,23 @@ class Bridge:
         for field, limit in [('host', 255), ('problem', 2048), ('occurred_at', 80)]:
             if not isinstance(data.get(field), str) or not 0 < len(data[field]) <= limit:
                 raise BridgeError('Contenuto evento incompleto o troppo lungo.')
+        if kind == 'recovery':
+            if not re.fullmatch(r'[1-9][0-9]{0,19}', str(data.get('recovery_eventid', ''))):
+                raise BridgeError('Identificativo RECOVERY non valido.')
+            if not isinstance(data.get('recovered_at'), str) or not 0 < len(data['recovered_at']) <= 80:
+                raise BridgeError('Data/ora RECOVERY non valida.')
         receipt_id = kind + ':' + str(data['eventid'])
         with self.operations:
             with self.lock:
                 current = copy.deepcopy(self.state)
+            if kind == 'recovery':
+                return self.recover(data, current)
+            with self.receipts() as db:
+                previous = db.execute('SELECT message_id,status FROM receipts WHERE id=?', (receipt_id,)).fetchone()
+                if previous:
+                    if previous[1] == 'sent':
+                        return {'message_id': previous[0], 'duplicate': True}
+                    raise BridgeError('Evento già tentato senza conferma: controlla Telegram e la diagnostica; nessun reinvio automatico.')
             if str(current.get('bot', {}).get('id')) != str(data['bot_id']):
                 raise BridgeError('Il bot è cambiato: salva nuovamente la configurazione notifiche.')
             destination = current.get('destination', {})
@@ -132,21 +150,14 @@ class Bridge:
                     or str(destination.get('message_thread_id') or '') != thread):
                 raise BridgeError('La destinazione è cambiata: salva nuovamente la configurazione notifiche.')
             with self.receipts() as db:
-                db.row_factory = sqlite3.Row
-                previous = db.execute('SELECT * FROM receipts WHERE id=?', (receipt_id,)).fetchone()
-                if previous:
-                    if previous['status'] == 'sent':
-                        return {'message_id': previous['message_id'], 'duplicate': True}
-                    raise BridgeError('Evento già tentato senza conferma: controlla Telegram e la diagnostica; nessun reinvio automatico.')
-                db.execute('INSERT INTO receipts VALUES (?,?,?,?,?,?,NULL,?,?,?)',
+                db.execute('INSERT INTO receipts '
+                           '(id,kind,eventid,host,chat_id,thread_id,status,detail,updated_at,hostid,bot_id,payload) '
+                           'VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
                            (receipt_id, kind, str(data['eventid']), data['host'], str(data['chat_id']),
-                            thread, 'sending', 'Invio in corso; in caso di interruzione verificare Telegram.', int(time.time())))
-            labels = ['Non classificato', 'Informazione', 'Avviso', 'Media', 'Alta', 'Disastro']
-            title = 'TEST TRASPORTO Zabbix Talk' if kind == 'transport' else 'PROBLEM · ' + data['host']
-            rich = {'html': '<h2>' + html.escape(title) + '</h2><p>' + html.escape(data['problem'])
-                    + '</p><p>Host: ' + html.escape(data['host']) + '<br>Severità: ' + labels[int(severity)]
-                    + '<br>Data/ora Zabbix: ' + html.escape(data['occurred_at'])
-                    + '<br>Evento: ' + str(data['eventid']) + ' · Host ID: ' + str(data['hostid']) + '</p>'}
+                            thread, 'sending', 'Invio in corso; in caso di interruzione verificare Telegram.', int(time.time()),
+                            str(data['hostid']), str(data['bot_id']), json.dumps({
+                                key: data[key] for key in ('kind', 'eventid', 'hostid', 'host', 'problem', 'severity', 'occurred_at')})))
+            rich = self.event_message(data)
             params = {'chat_id': int(data['chat_id']), 'rich_message': rich}
             if thread:
                 params['message_thread_id'] = int(thread)
@@ -163,6 +174,77 @@ class Bridge:
                 db.execute('UPDATE receipts SET status=?, message_id=?, detail=?, updated_at=? WHERE id=?',
                            ('sent', message['message_id'], 'Rich Message confermato da Telegram.', int(time.time()), receipt_id))
             return {'message_id': message['message_id'], 'duplicate': False}
+
+    @staticmethod
+    def event_message(data, recovery=None, announcement=False):
+        labels = ['Non classificato', 'Informazione', 'Avviso', 'Media', 'Alta', 'Disastro']
+        title = 'TEST TRASPORTO Zabbix Talk' if data['kind'] == 'transport' else 'PROBLEM · ' + data['host']
+        if recovery:
+            title = ('RIPRISTINO' if announcement else 'RISOLTO') + ' · ' + data['host']
+        content = '<h2>' + html.escape(title) + '</h2><p>' + html.escape(data['problem'])
+        content += '</p><p>Host: ' + html.escape(data['host']) + '<br>Severità: ' + labels[int(data['severity'])]
+        content += '<br>Inizio Zabbix: ' + html.escape(data['occurred_at'])
+        if recovery:
+            content += '<br>Ripristino Zabbix: ' + html.escape(recovery['recovered_at'])
+            content += '<br>RECOVERY: ' + str(recovery['recovery_eventid'])
+        content += '<br>Evento: ' + str(data['eventid']) + ' · Host ID: ' + str(data['hostid']) + '</p>'
+        return {'html': content}
+
+    def recover(self, data, current):
+        receipt_id = 'recovery:' + str(data['eventid'])
+        with self.receipts() as db:
+            db.row_factory = sqlite3.Row
+            original = db.execute('SELECT * FROM receipts WHERE id=?', ('problem:' + str(data['eventid']),)).fetchone()
+            if not original or original['status'] != 'sent' or not original['payload']:
+                raise BridgeError('PROBLEM originale non confermato o precedente al supporto RECOVERY: nessun nuovo messaggio inviato.')
+            if (original['hostid'] != str(data['hostid']) or original['bot_id'] != str(data['bot_id'])
+                    or original['bot_id'] != str(current.get('bot', {}).get('id'))):
+                raise BridgeError('Host o bot diversi dal PROBLEM originale: impossibile aggiornare il messaggio.')
+            previous = db.execute('SELECT * FROM receipts WHERE id=?', (receipt_id,)).fetchone()
+            if previous:
+                if previous['recovery_eventid'] != str(data['recovery_eventid']):
+                    raise BridgeError('RECOVERY diverso da quello già associato al PROBLEM.')
+                if previous['status'] == 'sent':
+                    return {'message_id': original['message_id'], 'recovery_message_id': previous['recovery_message_id'], 'duplicate': True}
+                raise BridgeError('RECOVERY già tentato senza conferma completa: controlla Telegram e la diagnostica; nessun reinvio automatico.')
+            db.execute('INSERT INTO receipts '
+                       '(id,kind,eventid,host,chat_id,thread_id,message_id,status,detail,updated_at,hostid,bot_id,recovery_eventid) '
+                       'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                       (receipt_id, 'recovery', original['eventid'], original['host'], original['chat_id'],
+                        original['thread_id'], original['message_id'], 'editing', 'Aggiornamento del PROBLEM in corso.',
+                        int(time.time()), original['hostid'], original['bot_id'], str(data['recovery_eventid'])))
+        event = json.loads(original['payload'])
+        params = {'chat_id': int(original['chat_id']), 'message_id': original['message_id'],
+                  'rich_message': self.event_message(event, data)}
+        edited = False
+        recovery_message_id = None
+        try:
+            message = self.api(current['token'], 'editMessageText', params)
+            if not isinstance(message, dict) or message.get('message_id') != original['message_id'] or not message.get('rich_message'):
+                raise BridgeError('Telegram non ha confermato la modifica del messaggio originale.')
+            edited = True
+            if int(event['severity']) in (4, 5):
+                with self.receipts() as db:
+                    db.execute('UPDATE receipts SET status=?,detail=?,updated_at=? WHERE id=?',
+                               ('sending', 'Originale aggiornato; invio del messaggio di ripristino in corso.', int(time.time()), receipt_id))
+                params = {'chat_id': int(original['chat_id']), 'rich_message': self.event_message(event, data, True)}
+                if original['thread_id']:
+                    params['message_thread_id'] = int(original['thread_id'])
+                message = self.api(current['token'], 'sendRichMessage', params)
+                if not isinstance(message, dict) or not message.get('message_id') or not message.get('rich_message'):
+                    raise BridgeError('Telegram non ha confermato il messaggio di ripristino.')
+                recovery_message_id = message['message_id']
+        except BridgeError as error:
+            detail = ('Originale aggiornato; nuovo ripristino non confermato. ' if edited else 'Modifica originale non confermata. ') + str(error)
+            with self.receipts() as db:
+                db.execute('UPDATE receipts SET status=?,detail=?,updated_at=? WHERE id=?',
+                           ('unconfirmed', detail, int(time.time()), receipt_id))
+            raise BridgeError(detail, error.retry_after) from None
+        with self.receipts() as db:
+            db.execute('UPDATE receipts SET status=?,detail=?,updated_at=?,recovery_message_id=? WHERE id=?',
+                       ('sent', 'Originale risolto; ' + ('nuovo ripristino confermato.' if recovery_message_id else 'nessun nuovo messaggio previsto.'),
+                        int(time.time()), recovery_message_id, receipt_id))
+        return {'message_id': original['message_id'], 'recovery_message_id': recovery_message_id, 'duplicate': False}
 
     def save(self):
         temporary = self.path.with_suffix('.tmp')
@@ -192,7 +274,7 @@ class Bridge:
             with self.receipts() as db:
                 db.row_factory = sqlite3.Row
                 receipts = [dict(row) for row in db.execute(
-                    'SELECT kind,eventid,host,chat_id,thread_id,message_id,status,detail,updated_at '
+                    'SELECT kind,eventid,host,chat_id,thread_id,message_id,status,detail,updated_at,recovery_eventid,recovery_message_id '
                     'FROM receipts ORDER BY updated_at DESC, rowid DESC LIMIT 8')]
             return copy.deepcopy({
                 'notifications': receipts,

@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +17,7 @@ class TelegramFlowTest(unittest.TestCase):
         self.calls = []
         self.member_status = 'administrator'
         self.deleted = False
+        self.next_message = 41
         self.token = '123456:' + 'x' * 35
         self.mock = patch('bridge.server.telegram', side_effect=self.telegram)
         self.mock.start()
@@ -36,7 +38,9 @@ class TelegramFlowTest(unittest.TestCase):
         if method == 'editMessageText' and self.deleted:
             raise BridgeError('Telegram 400: message to edit not found')
         if method in ('sendRichMessage', 'editMessageText'):
-            return {'message_id': 42, 'rich_message': {'blocks': []}}
+            if method == 'sendRichMessage':
+                self.next_message += 1
+            return {'message_id': params.get('message_id', self.next_message), 'rich_message': {'blocks': []}}
         raise AssertionError(method)
 
     def register(self, thread=None, code=None):
@@ -156,6 +160,106 @@ class TelegramFlowTest(unittest.TestCase):
                 self.bridge.notify(self.notification())
             self.assertEqual(api.call_count, 1)
         self.assertEqual(self.bridge.status()['notifications'][0]['status'], 'unconfirmed')
+
+    def recovery(self, **changes):
+        return self.notification(**dict({'kind': 'recovery', 'event_value': '0',
+                                         'recovery_eventid': '100', 'recovered_at': '2026-10-27 01:00:00'}, **changes))
+
+    def test_recovery_low_severities_only_edit_original(self):
+        self.register(17)
+        for severity in range(4):
+            with self.subTest(severity=severity):
+                eventid = str(200 + severity)
+                original = self.bridge.notify(self.notification(eventid=eventid, severity=str(severity)))
+                before = len(self.calls)
+                result = self.bridge.notify(self.recovery(eventid=eventid, severity=str(severity)))
+                writes = [(method, params) for method, params in self.calls[before:]]
+                self.assertEqual([method for method, _ in writes], ['editMessageText'])
+                self.assertEqual(result['message_id'], original['message_id'])
+                self.assertIsNone(result['recovery_message_id'])
+                self.assertIn('RISOLTO', writes[0][1]['rich_message']['html'])
+                self.assertIn('&lt;b&gt;literal problem&lt;/b&gt;', writes[0][1]['rich_message']['html'])
+                self.assertTrue(self.bridge.notify(self.recovery(eventid=eventid, severity=str(severity)))['duplicate'])
+
+    def test_recovery_high_disaster_after_restart_preserves_destination_and_deduplicates(self):
+        for severity in (4, 5):
+            with self.subTest(severity=severity):
+                self.bridge.action('register')
+                self.register(17)
+                eventid = str(300 + severity)
+                original = self.bridge.notify(self.notification(eventid=eventid, severity=str(severity)))
+                self.bridge.action('register')
+                self.register()
+                self.bridge = Bridge(self.path)
+                recovery = self.recovery(eventid=eventid, severity='0', chat_id='-9999', message_thread_id='29')
+                before = len(self.calls)
+                result = self.bridge.notify(recovery)
+                self.bridge = Bridge(self.path)
+                self.assertTrue(self.bridge.notify(recovery)['duplicate'])
+                self.assertTrue(self.bridge.notify(self.notification(eventid=eventid))['duplicate'])
+                writes = self.calls[before:]
+                self.assertEqual([method for method, _ in writes], ['editMessageText', 'sendRichMessage'])
+                self.assertEqual(writes[0][1]['message_id'], original['message_id'])
+                self.assertEqual(writes[1][1]['chat_id'], -1001)
+                self.assertEqual(writes[1][1]['message_thread_id'], 17)
+                self.assertIn('RIPRISTINO', writes[1][1]['rich_message']['html'])
+                self.assertNotEqual(result['recovery_message_id'], original['message_id'])
+                self.assertEqual(self.bridge.status()['notifications'][0]['status'], 'sent')
+
+    def test_recovery_deleted_original_and_partial_send_failure_never_claim_success(self):
+        self.register(17)
+        self.bridge.notify(self.notification())
+        self.deleted = True
+        before = len(self.calls)
+        with self.assertRaisesRegex(BridgeError, 'message to edit not found'):
+            self.bridge.notify(self.recovery())
+        self.assertEqual([method for method, _ in self.calls[before:]], ['editMessageText'])
+        self.assertEqual(self.bridge.status()['notifications'][0]['status'], 'unconfirmed')
+        self.bridge = Bridge(self.path)
+        with self.assertRaisesRegex(BridgeError, 'già tentato'):
+            self.bridge.notify(self.recovery())
+        self.deleted = False
+        self.bridge.notify(self.notification(eventid='101'))
+        api = self.bridge.api
+
+        def fail_send(token, method, params):
+            if method == 'sendRichMessage':
+                raise BridgeError('Network interrupted')
+            return api(token, method, params)
+
+        with patch.object(self.bridge, 'api', side_effect=fail_send) as mocked:
+            with self.assertRaisesRegex(BridgeError, 'Originale aggiornato; nuovo ripristino non confermato'):
+                self.bridge.notify(self.recovery(eventid='101'))
+            self.assertEqual(mocked.call_count, 2)
+        self.bridge = Bridge(self.path)
+        with patch.object(self.bridge, 'api') as mocked:
+            with self.assertRaisesRegex(BridgeError, 'già tentato'):
+                self.bridge.notify(self.recovery(eventid='101'))
+            mocked.assert_not_called()
+
+    def test_recovery_rejects_missing_or_mismatched_association(self):
+        self.register(17)
+        with self.assertRaisesRegex(BridgeError, 'originale non confermato'):
+            self.bridge.notify(self.recovery())
+        self.bridge.notify(self.notification())
+        for changes in [{'hostid': '18'}, {'bot_id': '77'}, {'recovery_eventid': '{EVENT.RECOVERY.ID}'},
+                        {'recovered_at': ''}, {'event_value': '1'}]:
+            with self.assertRaises(BridgeError):
+                self.bridge.notify(self.recovery(**changes))
+        self.assertFalse(any(method == 'editMessageText' for method, _ in self.calls))
+
+    def test_receipts_schema_upgrade_preserves_legacy_rows(self):
+        legacy = Path(self.temporary.name) / 'legacy'
+        legacy.mkdir()
+        with sqlite3.connect(legacy / 'notifications.sqlite3') as db:
+            db.execute('CREATE TABLE receipts (id TEXT PRIMARY KEY, kind TEXT, eventid TEXT, host TEXT, '
+                       'chat_id TEXT, thread_id TEXT, message_id INTEGER, status TEXT, detail TEXT, updated_at INTEGER)')
+            db.execute("INSERT INTO receipts VALUES ('problem:99','problem','99','legacy','-1001','17',42,'sent','ok',1)")
+        old = Bridge(legacy / 'telegram.json')
+        old.state = self.bridge.state
+        self.assertEqual(old.status()['notifications'][0]['message_id'], 42)
+        with self.assertRaisesRegex(BridgeError, 'precedente al supporto RECOVERY'):
+            old.notify(self.recovery())
 
 
 if __name__ == '__main__':

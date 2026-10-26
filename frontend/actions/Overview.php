@@ -80,11 +80,15 @@ class Overview extends CController {
             $data['labels']['problem_test'] = $notifications->testStatus();
             $receipts = [];
             foreach ($status['notifications'] ?? [] as $receipt) {
-                $receipts[] = ($receipt['kind'] === 'transport' ? 'TEST TRASPORTO' : 'PROBLEM')
+                $receipts[] = (['transport' => 'TEST TRASPORTO', 'problem' => 'PROBLEM', 'recovery' => 'RECOVERY'][$receipt['kind']] ?? $receipt['kind'])
                     .' · eventid '.$receipt['eventid'].' · '.$receipt['host'].' · '
-                    .(['sent' => _('Inviato'), 'sending' => _('Invio in corso o interrotto'),
-                        'unconfirmed' => _('Invio non confermato')][$receipt['status']] ?? $receipt['status'])
+                    .(['sent' => _('Confermato'), 'sending' => _('Invio in corso o interrotto'),
+                        'editing' => _('Modifica in corso o interrotta'),
+                        'unconfirmed' => _('Operazione non confermata')][$receipt['status']] ?? $receipt['status'])
                     .($receipt['message_id'] ? ' · message_id '.$receipt['message_id'] : '')
+                    .(!empty($receipt['recovery_eventid']) ? ' · recovery eventid '.$receipt['recovery_eventid'] : '')
+                    .(!empty($receipt['recovery_message_id']) ? ' · nuovo message_id '.$receipt['recovery_message_id'] : '')
+                    .' · chat_id '.$receipt['chat_id'].($receipt['thread_id'] ? ' · topic '.$receipt['thread_id'] : '')
                     .' · '.zbx_date2str(DATE_TIME_FORMAT_SECONDS, $receipt['updated_at']).' · '.$receipt['detail'];
             }
             $data['labels']['notification_receipts'] = $bridge_error !== '' ? _('Ricevute non disponibili: verifica il bridge.')

@@ -145,12 +145,14 @@ $notification_fields = new CFormGrid([
         ->setChecked($config['severities'] ?? [2, 3, 4, 5])->setColumns(3)),
     new CLabel(_('Risorse gestite')),
     new CFormField(_('Media Type Webhook «Zabbix Talk - Webhook», utente «zabbix-talk-notify», gruppo e ruolo dedicati, macro segreta del canale locale, Action «Zabbix Talk - PROBLEM». L’utente tecnico legge soltanto il gruppo scelto e non può accedere al frontend. Le severità sono filtrate dall’Action nativa.')),
+    new CLabel(_('Messaggi di ripristino')),
+    new CFormField(_('Il RECOVERY aggiorna il messaggio originale a RISOLTO. Alta/High (4) e Disastro/Disaster (5): anche un nuovo messaggio di ripristino. Severità 0–3: solo modifica silenziosa. Gli eventi già inviati conservano chat e topic originali.')),
     new CLabel(_('Conferma amministratore'), 'confirm'),
     new CFormField((new CCheckBox('confirm', '1'))->setLabel(_('Confermo la creazione/aggiornamento delle risorse e l’attivazione dell’Action per il gruppo e le severità scelti.')))
 ]);
 $page->addItem($notification_form('talk-notifications')->addItem(
     (new CTabView(['id' => 'talk-notifications-tabs']))
-        ->addTab('talk-notifications-tab', _('Notifiche PROBLEM'), [
+        ->addTab('talk-notifications-tab', _('Notifiche PROBLEM/RECOVERY'), [
             new CTag('h2', true, _('4. Attiva le notifiche reali')), $notification_fields
         ])->setFooter(makeFormFooter($button(_('Salva e attiva notifiche'), 'provision', (bool) $destination)))
 ));
@@ -165,15 +167,16 @@ if ($ids) {
 $checks = new CFormGrid([
     new CLabel(_('Test trasporto Webhook/Media Type')),
     new CFormField(_('Invia «TEST TRASPORTO» passando dal server Zabbix e dal bridge fino a Telegram. Non genera eventi e non verifica il filtro dell’Action.')),
-    new CLabel(_('Prova completa con evento PROBLEM')),
+    new CLabel(_('Prova completa PROBLEM/RECOVERY')),
     new CFormField([
         new CTag('ol', true, [
             new CTag('li', true, _('Crea l’host di prova isolato nel gruppo configurato. Il test usa la severità massima abilitata.')),
             new CTag('li', true, _('Attendi circa un minuto per la configurazione del server, poi premi Genera PROBLEM di prova.')),
             new CTag('li', true, _('Attendi la notifica Telegram e premi Aggiorna stato: confronta l’eventid PROBLEM con la ricevuta e il message_id.')),
-            new CTag('li', true, _('Al termine ripristina l’ambiente rimuovendo l’host di prova. La rimozione cancella soltanto host, item, trigger e storico di questa prova.'))
+            new CTag('li', true, _('Premi Genera RECOVERY di prova e attendi: il messaggio originale deve diventare RISOLTO mantenendo il message_id. Alta/Disastro: anche un nuovo messaggio di ripristino; severità 0–3: nessun nuovo messaggio. Aggiorna lo stato e confronta le ricevute.')),
+            new CTag('li', true, _('Al termine rimuovi l’host di prova. La rimozione cancella soltanto host, item, trigger e storico di questa prova; per verificare il ripristino usa prima Genera RECOVERY.'))
         ]),
-        new CTag('p', true, _('Il test può attivare altre Action già applicabili al gruppo scelto. Recovery e aggiornamento del messaggio sono previsti nella slice successiva.'))
+        new CTag('p', true, _('Il test usa la severità massima abilitata e può attivare altre Action già applicabili al gruppo scelto. Per provare la sola modifica silenziosa, seleziona severità 0–3 e ricrea l’host di prova.'))
     ]),
     new CLabel(_('Evento di prova Zabbix')), new CFormField($text('problem_test')),
     new CLabel(_('Ultime ricevute del bridge')),
@@ -186,6 +189,7 @@ $page->addItem($notification_form('talk-notification-tests')->addItem(
         ])->setFooter(makeFormFooter($button(_('Test trasporto Webhook'), 'transport', $ready), [
             $button(_('Crea host di prova'), 'prepare_test', $ready && empty($config['fixture']))->addClass(ZBX_STYLE_BTN_ALT),
             $button(_('Genera PROBLEM di prova'), 'problem_test', $ready && !empty($config['fixture']))->addClass(ZBX_STYLE_BTN_ALT),
+            $button(_('Genera RECOVERY di prova'), 'recovery_test', $ready && !empty($config['recovery_enabled']) && !empty($config['fixture']))->addClass(ZBX_STYLE_BTN_ALT),
             $button(_('Ripristina e rimuovi host di prova'), 'remove_test', !empty($config['fixture']))->addClass(ZBX_STYLE_BTN_ALT)
         ]))
 ));

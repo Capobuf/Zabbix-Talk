@@ -15,7 +15,7 @@ require_once __DIR__.'/../includes/Notifications.php';
 class Configure extends CController {
     protected function checkInput(): bool {
         if (!$this->validateInput([
-            'operation' => 'required|in provision,transport,prepare_test,problem_test,remove_test',
+            'operation' => 'required|in provision,transport,prepare_test,problem_test,recovery_test,remove_test',
             'groupid' => 'db hstgrp.groupid', 'severities' => 'array', 'confirm' => 'in 1'
         ])) {
             $this->setResponse(new CControllerResponseRedirect(
@@ -46,6 +46,9 @@ class Configure extends CController {
                     break;
                 case 'problem_test':
                     $message = $notifications->problemTest();
+                    break;
+                case 'recovery_test':
+                    $message = $notifications->recoveryTest();
                     break;
                 case 'remove_test':
                     $message = $notifications->removeTest();

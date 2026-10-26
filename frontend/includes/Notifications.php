@@ -111,7 +111,9 @@ class Notifications {
             $message = _('Risorse mancanti: ').implode(', ', $missing)._('. Conferma nuovamente il setup per ricrearle.');
         }
         else {
-            $message = $enabled ? _('Action attiva e risorse sincronizzate.') : _('Action disabilitata.');
+            $message = $enabled ? (empty($config['recovery_enabled'])
+                ? _('Salva e attiva notifiche per abilitare anche i RECOVERY sugli eventi successivi.')
+                : _('Action PROBLEM/RECOVERY attiva e risorse sincronizzate.')) : _('Action disabilitata.');
         }
         return ['config' => array_diff_key($config, ['observed' => true]),
             'ready' => $same_telegram && !$changed && $enabled, 'message' => $message];
@@ -152,9 +154,11 @@ class Notifications {
     }
 
     private function parameters(array $destination, array $bot): array {
-        $values = ['channel_key' => '{$ZABBIX_TALK_CHANNEL_KEY}', 'kind' => 'problem', 'eventid' => '{EVENT.ID}',
+        $values = ['channel_key' => '{$ZABBIX_TALK_CHANNEL_KEY}', 'kind' => '{ALERT.MESSAGE}', 'eventid' => '{EVENT.ID}',
             'event_value' => '{EVENT.VALUE}', 'hostid' => '{HOST.ID}', 'host' => '{HOST.NAME}',
             'problem' => '{EVENT.NAME}', 'severity' => '{EVENT.NSEVERITY}',
+            'recovery_eventid' => '{EVENT.RECOVERY.ID}', 'recovery_value' => '{EVENT.RECOVERY.VALUE}',
+            'recovered_at' => '{EVENT.RECOVERY.DATE} {EVENT.RECOVERY.TIME}',
             'occurred_at' => '{EVENT.DATE} {EVENT.TIME}', 'bot_id' => (string) $bot['id'],
             'chat_id' => (string) $destination['chat_id'],
             'message_thread_id' => $destination['message_thread_id'] ? (string) $destination['message_thread_id'] : ''];
@@ -214,8 +218,8 @@ class Notifications {
             ], $existing, $config);
             $this->put('media', API::MediaType(), 'mediatypeid', [
                 'name' => 'Zabbix Talk - Webhook', 'type' => MEDIA_TYPE_WEBHOOK, 'status' => MEDIA_TYPE_STATUS_ACTIVE,
-                'description' => 'Managed by Zabbix Talk. Local authenticated PROBLEM transport.',
-                'script' => file_get_contents(__DIR__.'/webhook.js'), 'timeout' => '15s',
+                'description' => 'Managed by Zabbix Talk. Local authenticated PROBLEM/RECOVERY transport.',
+                'script' => file_get_contents(__DIR__.'/webhook.js'), 'timeout' => '30s',
                 'maxattempts' => 1, 'maxsessions' => 1, 'process_tags' => 0, 'show_event_menu' => 0,
                 'parameters' => $this->parameters($state['destination'], $state['bot']),
                 'message_templates' => []
@@ -239,16 +243,19 @@ class Notifications {
                 'status' => ACTION_STATUS_ENABLED, 'esc_period' => '1m',
                 'filter' => ['evaltype' => CONDITION_EVAL_TYPE_AND_OR, 'conditions' => $conditions],
                 'operations' => [['operationtype' => OPERATION_TYPE_MESSAGE, 'esc_step_from' => 1, 'esc_step_to' => 1,
-                    'opmessage' => ['default_msg' => 0, 'subject' => 'Zabbix Talk', 'message' => 'PROBLEM',
+                    'opmessage' => ['default_msg' => 0, 'subject' => 'Zabbix Talk', 'message' => 'problem',
                         'mediatypeid' => $config['ids']['media']],
                     'opmessage_usr' => [['userid' => $config['ids']['user']]]]],
-                'recovery_operations' => [], 'update_operations' => []
+                'recovery_operations' => [['operationtype' => OPERATION_TYPE_RECOVERY_MESSAGE,
+                    'opmessage' => ['default_msg' => 0, 'subject' => 'Zabbix Talk', 'message' => 'recovery']]],
+                'update_operations' => []
             ], $existing, $config);
             $config['groupid'] = $groupid;
             $config['group_name'] = $groups[0]['name'];
             $config['severities'] = $severities;
             $config['destination'] = $state['destination'];
             $config['bot_id'] = $state['bot']['id'];
+            $config['recovery_enabled'] = true;
             $config['observed'] = [];
             $this->save($config);
             $config['observed'] = $this->resources();
@@ -354,17 +361,32 @@ class Notifications {
         });
     }
 
+    public function recoveryTest(): string {
+        if (!$this->status()['ready'] || empty($this->config()['recovery_enabled'])) {
+            throw new RuntimeException(_('Salva prima il setup PROBLEM/RECOVERY.'));
+        }
+        $fixture = $this->fixture();
+        $result = self::ok(API::History()->push([['itemid' => $fixture['itemid'], 'value' => '0']]));
+        foreach ($result['data'] as $row) {
+            if (!empty($row['error'])) {
+                throw new RuntimeException($row['error']);
+            }
+        }
+        return _('Valore di ripristino accettato da Zabbix. Attendi il RECOVERY e premi Aggiorna stato: verifica la ricevuta e lo stesso message_id risolto in Telegram. Per Alta/Disastro è previsto anche un nuovo messaggio di ripristino.');
+    }
+
     public function testStatus(): string {
         $fixture = $this->config()['fixture'] ?? null;
         if (!$fixture) {
             return _('Nessun host di prova creato.');
         }
-        $events = self::ok(API::Event()->get(['output' => ['eventid', 'clock', 'name', 'severity'],
+        $events = self::ok(API::Event()->get(['output' => ['eventid', 'clock', 'name', 'severity', 'r_eventid'],
             'source' => EVENT_SOURCE_TRIGGERS, 'object' => EVENT_OBJECT_TRIGGER,
             'objectids' => [$fixture['triggerid']], 'value' => TRIGGER_VALUE_TRUE,
             'sortfield' => 'eventid', 'sortorder' => 'DESC', 'limit' => 1]));
         return 'Host ID '.$fixture['hostid'].' · trigger ID '.$fixture['triggerid'].' · '.($events
             ? 'PROBLEM eventid '.$events[0]['eventid'].' · '.zbx_date2str(DATE_TIME_FORMAT_SECONDS, $events[0]['clock'])
+                .($events[0]['r_eventid'] !== '0' ? ' · RECOVERY eventid '.$events[0]['r_eventid'] : _(' · ancora aperto'))
             : _('Nessun evento PROBLEM rilevato.'));
     }
 
