@@ -1,14 +1,16 @@
-"""Local Telegram bridge; only health is exposed over loopback TCP."""
+"""Local Telegram bridge; authenticated notifications and health over loopback TCP."""
 
 import copy
 import fcntl
 import grp
+import html
 import json
 import logging
 import os
 import re
 import secrets
 import socketserver
+import sqlite3
 import threading
 import time
 import urllib.error
@@ -70,6 +72,97 @@ class Bridge:
         self.last_poll = 0
         self.registration = None
         self.cooldown = 0
+        self.channel_path = path.with_name('channel.key')
+        self.receipts_path = path.with_name('notifications.sqlite3')
+        with self.receipts() as db:
+            db.execute('CREATE TABLE IF NOT EXISTS receipts ('
+                       'id TEXT PRIMARY KEY, kind TEXT, eventid TEXT, host TEXT, '
+                       'chat_id TEXT, thread_id TEXT, message_id INTEGER, '
+                       'status TEXT, detail TEXT, updated_at INTEGER)')
+
+    def receipts(self):
+        return sqlite3.connect(self.receipts_path)
+
+    def channel(self):
+        with self.operations:
+            if not self.channel_path.exists():
+                fd = os.open(self.channel_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, 'w') as stream:
+                    stream.write(secrets.token_hex(32))
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            key = self.channel_path.read_text()
+            if not re.fullmatch(r'[a-f0-9]{64}', key):
+                raise BridgeError('Chiave locale non valida. Ripristina channel.key prima di salvare il setup.')
+            return {'key': key}
+
+    def authorized(self, header):
+        if not self.channel_path.exists():
+            return False
+        key = self.channel_path.read_text()
+        return bool(re.fullmatch(r'[a-f0-9]{64}', key)) and secrets.compare_digest(
+            header.encode(), ('Bearer ' + key).encode())
+
+    def notify(self, data):
+        kind = data.get('kind')
+        if kind not in ('problem', 'transport') or str(data.get('event_value')) != '1':
+            raise BridgeError('Sono supportati soltanto eventi PROBLEM e test del trasporto.')
+        for field in ('eventid', 'hostid', 'bot_id'):
+            if not re.fullmatch(r'[1-9][0-9]{0,19}', str(data.get(field, ''))):
+                raise BridgeError('Identificativi evento, host o bot non validi.')
+        if not re.fullmatch(r'-[1-9][0-9]{0,19}', str(data.get('chat_id', ''))):
+            raise BridgeError('Destinazione del Webhook non valida.')
+        thread = str(data.get('message_thread_id', ''))
+        if thread and not re.fullmatch(r'[1-9][0-9]{0,19}', thread):
+            raise BridgeError('Topic del Webhook non valido.')
+        severity = str(data.get('severity', ''))
+        if severity not in ('0', '1', '2', '3', '4', '5'):
+            raise BridgeError('Severità numerica non valida.')
+        for field, limit in [('host', 255), ('problem', 2048), ('occurred_at', 80)]:
+            if not isinstance(data.get(field), str) or not 0 < len(data[field]) <= limit:
+                raise BridgeError('Contenuto evento incompleto o troppo lungo.')
+        receipt_id = kind + ':' + str(data['eventid'])
+        with self.operations:
+            with self.lock:
+                current = copy.deepcopy(self.state)
+            if str(current.get('bot', {}).get('id')) != str(data['bot_id']):
+                raise BridgeError('Il bot è cambiato: salva nuovamente la configurazione notifiche.')
+            destination = current.get('destination', {})
+            if (str(destination.get('chat_id', '')) != str(data['chat_id'])
+                    or str(destination.get('message_thread_id') or '') != thread):
+                raise BridgeError('La destinazione è cambiata: salva nuovamente la configurazione notifiche.')
+            with self.receipts() as db:
+                db.row_factory = sqlite3.Row
+                previous = db.execute('SELECT * FROM receipts WHERE id=?', (receipt_id,)).fetchone()
+                if previous:
+                    if previous['status'] == 'sent':
+                        return {'message_id': previous['message_id'], 'duplicate': True}
+                    raise BridgeError('Evento già tentato senza conferma: controlla Telegram e la diagnostica; nessun reinvio automatico.')
+                db.execute('INSERT INTO receipts VALUES (?,?,?,?,?,?,NULL,?,?,?)',
+                           (receipt_id, kind, str(data['eventid']), data['host'], str(data['chat_id']),
+                            thread, 'sending', 'Invio in corso; in caso di interruzione verificare Telegram.', int(time.time())))
+            labels = ['Non classificato', 'Informazione', 'Avviso', 'Media', 'Alta', 'Disastro']
+            title = 'TEST TRASPORTO Zabbix Talk' if kind == 'transport' else 'PROBLEM · ' + data['host']
+            rich = {'html': '<h2>' + html.escape(title) + '</h2><p>' + html.escape(data['problem'])
+                    + '</p><p>Host: ' + html.escape(data['host']) + '<br>Severità: ' + labels[int(severity)]
+                    + '<br>Data/ora Zabbix: ' + html.escape(data['occurred_at'])
+                    + '<br>Evento: ' + str(data['eventid']) + ' · Host ID: ' + str(data['hostid']) + '</p>'}
+            params = {'chat_id': int(data['chat_id']), 'rich_message': rich}
+            if thread:
+                params['message_thread_id'] = int(thread)
+            try:
+                message = self.api(current['token'], 'sendRichMessage', params)
+                if not isinstance(message, dict) or not message.get('message_id') or not message.get('rich_message'):
+                    raise BridgeError('Telegram non ha confermato il Rich Message. Controlla la chat.')
+            except BridgeError as error:
+                with self.receipts() as db:
+                    db.execute('UPDATE receipts SET status=?, detail=?, updated_at=? WHERE id=?',
+                               ('unconfirmed', str(error), int(time.time()), receipt_id))
+                raise
+            with self.receipts() as db:
+                db.execute('UPDATE receipts SET status=?, message_id=?, detail=?, updated_at=? WHERE id=?',
+                           ('sent', message['message_id'], 'Rich Message confermato da Telegram.', int(time.time()), receipt_id))
+            return {'message_id': message['message_id'], 'duplicate': False}
 
     def save(self):
         temporary = self.path.with_suffix('.tmp')
@@ -96,7 +189,13 @@ class Bridge:
             registration = self.registration
             if registration and registration['expires'] <= time.time():
                 self.registration = registration = None
+            with self.receipts() as db:
+                db.row_factory = sqlite3.Row
+                receipts = [dict(row) for row in db.execute(
+                    'SELECT kind,eventid,host,chat_id,thread_id,message_id,status,detail,updated_at '
+                    'FROM receipts ORDER BY updated_at DESC, rowid DESC LIMIT 8')]
             return copy.deepcopy({
+                'notifications': receipts,
                 'bot': self.state.get('bot'),
                 'verified_at': self.state.get('verified_at'),
                 'polling': self.last_poll > time.time() - 80 and not self.poll_error,
@@ -292,23 +391,33 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(404, {'error': 'Percorso non disponibile.'})
 
     def do_POST(self):
-        if not isinstance(self.server, ControlServer) or self.path != '/action':
+        control = isinstance(self.server, ControlServer)
+        if not control and self.path == '/notify':
+            if not self.server.bridge.authorized(self.headers.get('Authorization', '')):
+                self.reply(401, {'error': 'Autenticazione locale non valida.'})
+                return
+        elif not control or self.path not in ('/action', '/channel'):
             self.reply(404, {'error': 'Percorso non disponibile.'})
             return
         try:
             length = int(self.headers.get('Content-Length', 0))
-            if not 0 < length <= 2048:
+            if not 0 < length <= 16384:
                 raise ValueError
             data = json.loads(self.rfile.read(length))
             if not isinstance(data, dict) or not isinstance(data.get('token', ''), str):
                 raise ValueError
-            result = self.server.bridge.action(data.get('operation'), data.get('token', ''))
-            self.reply(200, {'message': result})
+            if self.path == '/notify':
+                result = self.server.bridge.notify(data)
+            elif self.path == '/channel':
+                result = self.server.bridge.channel()
+            else:
+                result = {'message': self.server.bridge.action(data.get('operation'), data.get('token', ''))}
+            self.reply(200, result)
         except (ValueError, TypeError):
             self.reply(400, {'error': 'Richiesta non valida.'})
         except BridgeError as error:
             self.reply(400, {'error': str(error)})
-        except OSError:
+        except (OSError, sqlite3.Error):
             self.reply(500, {'error': 'Impossibile salvare lo stato locale. Controlla il servizio prima di ripetere il test.'})
 
     def log_message(self, format, *args):
@@ -332,7 +441,7 @@ if __name__ == '__main__':
         if os.path.exists(SOCKET):
             os.unlink(SOCKET)
         with ControlServer(SOCKET, Handler) as control, ThreadingHTTPServer(('127.0.0.1', 8765), Handler) as health:
-            control.bridge = bridge
+            control.bridge = health.bridge = bridge
             os.chown(SOCKET, -1, grp.getgrnam('www-data').gr_gid)
             os.chmod(SOCKET, 0o660)
             threading.Thread(target=bridge.poll, daemon=True).start()

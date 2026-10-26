@@ -2,7 +2,7 @@
 
 Zabbix Talk integra un modulo di configurazione nel frontend Zabbix e un bridge Telegram locale per notifiche e operazioni sugli incidenti.
 
-Il bootstrap [#1](https://github.com/Capobuf/Zabbix-Talk/issues/1) è integrato. Il branch della slice [#2](https://github.com/Capobuf/Zabbix-Talk/issues/2) aggiunge bot Telegram, collegamento gruppo/topic e invio/modifica di un Rich Message di prova. Notifiche di eventi Zabbix e Action restano fuori da questa slice.
+Le slice [#1](https://github.com/Capobuf/Zabbix-Talk/issues/1) e [#2](https://github.com/Capobuf/Zabbix-Talk/issues/2) sono integrate. Il branch della slice [#3](https://github.com/Capobuf/Zabbix-Talk/issues/3) aggiunge il setup delle notifiche PROBLEM tramite Action nativa e Webhook locale, con test del trasporto e prova tramite evento reale separati.
 
 ## Riferimenti di progetto
 
@@ -15,7 +15,7 @@ Il bootstrap [#1](https://github.com/Capobuf/Zabbix-Talk/issues/1) è integrato.
 ## Struttura
 
 - `frontend/`: modulo PHP nativo del frontend Zabbix.
-- `bridge/`: health endpoint, long polling e controllo Telegram, Python senza dipendenze esterne.
+- `bridge/`: health endpoint, Webhook autenticato, long polling e controllo Telegram, Python senza dipendenze esterne.
 - `scripts/`: installazione/aggiornamento idempotente e rollback sulla VM.
 - `systemd/`: servizio con utenza dedicata e privilegi minimi.
 
@@ -37,7 +37,7 @@ La VM Zabbix è anche l'ambiente di sviluppo. Rilevamenti del 26 ottobre 2026:
 
 Accesso LAN: `http://172.16.100.7/zabbix/`. Apache configura anche `https://zabbix.nirolabel.it/zabbix/`, con certificato valido sulla VM; durante il lavoro il nome DNS non si risolve dalla VM. La topologia non richiede modifiche al codice core Zabbix né riavvii di Apache o Zabbix server.
 
-Solo `frontend/` è collegato alla webroot. `/etc/zabbix-talk` è riservata alla configurazione (`root:zabbix-talk`, `0750`); `/var/lib/zabbix-talk` allo stato (`zabbix-talk:zabbix-talk`, `0750`). Host e porta health sono fissi. La configurazione Telegram (token, identità bot, destinazione, offset del polling e ultimo test) è salvata atomicamente in `/var/lib/zabbix-talk/telegram.json`, proprietario `zabbix-talk`, modo `0600`. Il token non è restituito alla UI. Non inserire segreti nel checkout o nel frontend. L'utenza web non ha accesso alle due directory; il bridge può scrivere nella directory di stato, nella directory runtime e nei percorsi temporanei privati concessi da systemd. Il frontend accede al controllo tramite `/run/zabbix-talk/control.sock`, modo `0660`, gruppo `www-data`; le operazioni di controllo non sono esposte su TCP. Il servizio appartiene anche al gruppo `www-data` per assegnare il socket. Il repository appartiene all'utente di sviluppo e `.git` ha permessi `0700`.
+Solo `frontend/` è collegato alla webroot. `/etc/zabbix-talk` è riservata alla configurazione (`root:zabbix-talk`, `0750`); `/var/lib/zabbix-talk` allo stato (`zabbix-talk:zabbix-talk`, `0750`). Host e porta health sono fissi. La configurazione Telegram (token, identità bot, destinazione, offset del polling e ultimo test) è salvata atomicamente in `/var/lib/zabbix-talk/telegram.json`, proprietario `zabbix-talk`, modo `0600`. Il token non è restituito alla UI. Non inserire segreti nel checkout o nel frontend. L'utenza web non ha accesso alle due directory; il bridge può scrivere nella directory di stato, nella directory runtime e nei percorsi temporanei privati concessi da systemd. Il frontend accede al controllo tramite `/run/zabbix-talk/control.sock`, modo `0660`, gruppo `www-data`; le operazioni di controllo non sono esposte su TCP. Il solo endpoint di notifica `POST http://127.0.0.1:8765/notify` richiede una chiave locale, conservata in `/var/lib/zabbix-talk/channel.key` (modo `0600`) e nella macro globale segreta Zabbix `{$ZABBIX_TALK_CHANNEL_KEY}`; il Media Type contiene soltanto il riferimento alla macro. Il token bot resta esclusivamente nel bridge. Le ricevute persistono in `/var/lib/zabbix-talk/notifications.sqlite3`, nella stessa directory privata. Il servizio appartiene anche al gruppo `www-data` per assegnare il socket. Il repository appartiene all'utente di sviluppo e `.git` ha permessi `0700`.
 
 ### Prima installazione
 
@@ -72,7 +72,7 @@ git pull --ff-only
 sudo ./scripts/install.sh /usr/share/zabbix/ui super
 ```
 
-Il branch della slice corrente è `issue/2-telegram-connection`. Usa `git pull` dopo la pubblicazione del branch e la configurazione dell'upstream, oppure su `main` quando la modifica sarà integrata. Non sovrascrivere modifiche locali. Per modifiche al solo Python basta `sudo systemctl restart zabbix-talk`; per PHP aggiorna la pagina. Quando cambiano unità systemd, socket o permessi, riesegui l’installer. La VM usa il codice del checkout, senza build, container o dipendenze Python esterne.
+Il branch della slice corrente è `issue/3-problem-notifications`. Usa `git pull` dopo la pubblicazione del branch e la configurazione dell'upstream, oppure su `main` quando la modifica sarà integrata. Non sovrascrivere modifiche locali. Per modifiche al solo Python basta `sudo systemctl restart zabbix-talk`; per PHP aggiorna la pagina. Quando cambiano unità systemd, socket o permessi, riesegui l’installer. La VM usa il codice del checkout, senza build, container o dipendenze Python esterne.
 
 ```bash
 systemctl status zabbix-talk --no-pager
@@ -85,7 +85,7 @@ readlink -f /usr/share/zabbix/ui/modules/zabbix-talk
 
 I log di avvio/errori vanno al journal; il bridge non registra URL o header delle richieste. Per errori PHP consulta `/var/log/apache2/error.log` o `/var/log/apache2/zabbix-ssl-error.log`, in base al virtual host. Se manca il menu, verifica abilitazione del modulo e ruolo dell'utente.
 
-Per provare il cambio reale di stato, apri la pagina, esegui `sudo systemctl stop zabbix-talk` e premi **Aggiorna stato**: deve comparire **Bridge non raggiungibile**. Esegui `sudo systemctl start zabbix-talk` e premi di nuovo **Aggiorna stato**: deve comparire **Bridge raggiungibile**. La porta 8765 non deve rispondere usando l'indirizzo LAN della VM.
+Per provare il cambio reale di stato, apri la pagina, esegui `sudo systemctl stop zabbix-talk` e premi **Aggiorna stato**: deve comparire **Bridge non raggiungibile**. Esegui `sudo systemctl start zabbix-talk` e premi di nuovo **Aggiorna stato**: deve comparire **Bridge raggiungibile**. La porta 8765 non deve rispondere usando l'indirizzo LAN della VM. `/notify` senza autenticazione restituisce HTTP 401; `/status`, `/channel` e `/action` non sono esposti su TCP.
 
 ### Rollback
 
@@ -137,3 +137,46 @@ Ripetuta la prova con un gruppo reale senza topic: thread assente, invio e modif
 Riavviato il servizio reale e ripetuta la modifica del test nel gruppo senza topic: `message_id 19` conservato, revisione 2. I tre passaggi della UI sono numerati. Verificati nel browser aggiornamento manuale senza navigazione (anche conservando un token non ancora inviato), copia esatta del comando con feedback e pulsante di aggiornamento accanto al comando, senza errori JavaScript osservati.
 
 Il nuovo aggiornamento parziale è stato verificato anche fermando e riavviando il servizio reale: stato e disponibilità dei test si aggiornano senza navigazione. Verificato inoltre il rifiuto dell’accesso anonimo alla route JSON.
+
+
+### Notifiche PROBLEM reali (slice #3)
+
+Nella stessa pagina **Zabbix Talk**, il punto **4. Attiva le notifiche reali** permette di scegliere un solo gruppo host, le severità numeriche abilitate e la destinazione Telegram già collegata al punto 2. Le notifiche sono 24/7. Spunta la conferma amministratore e premi **Salva e attiva notifiche**: senza conferma, Super Admin e CSRF l'operazione è rifiutata. Il gruppo include gli host secondo le condizioni native Zabbix, non un filtro aggiuntivo del bridge.
+
+Il modulo crea Media Type **Zabbix Talk - Webhook**, Action **Zabbix Talk - PROBLEM**, utente **zabbix-talk-notify**, gruppo utenti e ruolo **Zabbix Talk - Notify**, macro globale segreta **{$ZABBIX_TALK_CHANNEL_KEY}**. L'utente tecnico ha una password casuale non conservata, frontend disabilitato, API disabilitata e sola lettura sul gruppo scelto. Il suo media è attivo 24/7 per tutte le severità; il filtro delle severità è soltanto nell'Action. L'operazione messaggio ha un solo passo e un solo destinatario, senza recovery o update operations.
+
+Gli ID e lo stato osservato delle risorse sono salvati nella configurazione nativa del modulo nel database Zabbix, insieme alle risorse nella stessa transazione. Il salvataggio concorrente è serializzato sulla riga del modulo. Il salvataggio ripetuto riutilizza gli ID. Prima di aggiornare vengono rilette le risorse: modifiche esterne bloccano la sovrascrittura e sono mostrate in pagina. Un oggetto omonimo non registrato come gestito non viene adottato. Le altre Action e gli altri canali non vengono modificati. Un errore API o di permessi annulla la transazione; nessuna Action viene attivata senza filtro gruppo e almeno una severità.
+
+Il Webhook usa `HttpRequest` del server Zabbix e invia i soli dati necessari su loopback, con autenticazione Bearer. Nessuna chiamata Telegram proviene dal Media Type. Il bridge usa `sendRichMessage` e mostra host, problema, severità, data/ora Zabbix, eventid e hostid; i testi sono escapati prima di comporre l'HTML. La chiave di canale non è restituita dal frontend, dai messaggi o dalla diagnostica del bridge. La macro di tipo Secret text non restituisce il valore tramite API/UI e Zabbix ne maschera l'audit. La configurazione del modulo conserva soltanto i metadati della macro, mai il valore. Non registrare i parametri risolti nel debug del Webhook. Il test del trasporto recupera la chiave soltanto dal socket protetto, perché il test nativo non espande le macro.
+
+Il punto **5. Verifica trasporto ed evento reale** offre due prove distinte:
+
+1. **Test trasporto Webhook** esegue il Media Type sul server tramite `CZabbixServer::testMediaType`, usando la sessione corrente. Invia un Rich Message **TEST TRASPORTO**, con esito effettivo e message_id. Non verifica trigger, filtro gruppo, severità o Action.
+2. **Crea host di prova** crea soltanto un host isolato `Zabbix-Talk-Test-<moduleid>`, un item trapper `zabbix.talk.test` e un trigger alla severità massima abilitata, nel gruppo scelto. Attendi circa un minuto per la cache del server e premi **Genera PROBLEM di prova**: `history.push` invia il valore 1. Un valore accettato non è ancora una prova completa: premi **Aggiorna stato** dopo l'elaborazione e confronta l'eventid nativo con la ricevuta PROBLEM del bridge e il message_id effettivo in Telegram. Ripetere 1 mentre il trigger è già in PROBLEM non genera un nuovo evento.
+3. **Ripristina e rimuovi host di prova** elimina quell'host con item, trigger e storico, senza modificare host operativi. Se contiene nuovi item, trigger o gruppi aggiunti esternamente, la rimozione automatica viene bloccata. Per ripetere la prova, ricrea l'host. Altre Action già applicabili al gruppo possono reagire anche all'host di prova: scegliere preferibilmente un gruppo dedicato al collaudo.
+
+Il server deve accettare `history.push` dalla sessione amministratore per la prova completa. Gli errori per cache non aggiornata, permessi o server non raggiungibile restano visibili; non vengono convertiti in successi. Il modulo non usa né conserva un token Super Admin.
+
+Le ultime otto ricevute mostrano separatamente test del trasporto ed eventi, con stato, errore e message_id. Le ricevute persistono dopo riavvio e un eventid già confermato non produce un secondo invio. Il Media Type ha un solo tentativo: in caso di rete interrotta o risposta ambigua il bridge conserva «invio non confermato» e non reinvia automaticamente; controllare Telegram e **Reports → Action log**. Questo evita duplicazioni senza promettere consegna garantita in caso di guasto. Il recupero/reinvio esplicito degli invii incerti non fa parte di questa slice.
+
+Dopo il cambio del bot o del gruppo/topic Telegram, salva nuovamente il punto 4. Fino ad allora il bridge rifiuta gli eventi per la configurazione precedente; nessun instradamento implicito alla nuova chat. Le notifiche RECOVERY, la modifica del messaggio originale e il routing multiplo sono fuori scope.
+
+
+Riferimenti ufficiali per il canale locale: [parametri Webhook e macro](https://www.zabbix.com/documentation/7.4/en/manual/config/notifications/media/webhook), [macro segrete](https://www.zabbix.com/documentation/7.4/en/manual/config/macros/secret_macros), [linee guida Webhook e limiti del test](https://www.zabbix.com/documentation/guidelines/en/webhooks).
+
+#### Prove della slice #3 sulla VM
+
+Il 27 ottobre 2026 sono stati verificati nel frontend reale:
+
+- Setup dalla pagina del modulo, usando il gruppo isolato **Zabbix Talk - Test slice 3** (ID 25). Salvataggi ripetuti conservano Media Type 110, utente 5, gruppo utenti 16, ruolo 6 e Action 15; il setup finale include anche l'ID della macro segreta. Nessuna configurazione operativa preesistente è stata modificata.
+- Test del trasporto finale riuscito: Rich Message `message_id 22` nel gruppo Telegram collegato senza topic specifico.
+- PROBLEM nativo `8671`, sull'host isolato `10811`, trigger `34566`: Rich Message `message_id 23`. La precedente prova `8639` aveva prodotto un solo alert nativo inviato (alert 120), senza errori; un PROBLEM `8642` su un host esterno al gruppo selezionato non aveva prodotto alert Zabbix Talk.
+- Riavvio del servizio e riconsegna autenticata dell'evento `8671`: restituito `message_id 23`, `duplicate: true`, senza nuovo invio.
+- Modifica controllata del nome della sola Action gestita: rilevata e salvataggio bloccato senza sovrascriverla. Nome ripristinato al termine della verifica.
+- POST senza CSRF rifiutato; `/notify` senza autenticazione restituisce 401. Token bot e chiave corrente assenti da pagina e risposta JSON di stato. Macro segreta priva del valore nella risposta API, nessuna chiave corrente nei parametri salvati del Media Type o nella configurazione del modulo, zero corrispondenze della chiave corrente nell'audit Zabbix. La chiave del collaudo iniziale è stata revocata prima del passaggio alla macro segreta.
+- Aggiornamento di evento/ricevute senza navigazione, conservando un token non ancora inviato nel campo. Nessun errore JavaScript osservato. Controllate le sezioni su desktop e a 1024 px; sotto il minimo nativo resta lo scorrimento orizzontale della piattaforma.
+- Host di prova interno rimosso tramite il pulsante della pagina; host e gruppo della prova esterna eliminati. Il gruppo selezionato e le risorse del setup restano pronti per la revisione. Le ricevute dei messaggi di collaudo rimangono consultabili; gli eventi degli host eliminati non restano nella prova corrente.
+
+I nove test del bridge sono superati, inclusi topic, riconsegna dopo riavvio, escaping del testo, payload respinto, invio incerto e chiave vuota/non valida. La slice #3 è stata provata dal vivo nel gruppo attualmente collegato senza topic; il caso topic è coperto dai test del bridge e dalle prove Telegram della slice #2, non da un nuovo evento reale della slice #3.
+
+Per ritirare questa slice, disabilitare prima **Zabbix Talk - PROBLEM** in **Alerts → Actions → Trigger actions**, quindi fermare/rimuovere il bridge o tornare alla revisione precedente. Il rollback del servizio conserva le risorse Zabbix e lo stato locale; non elimina automaticamente Action, account o macro.
