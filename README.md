@@ -6,9 +6,11 @@ Zabbix Talk integra un modulo di configurazione nel frontend Zabbix e un bridge 
 
 ## Riferimenti di progetto
 
-- [Specifica funzionale e UX — bozza v0.10](https://docs.google.com/document/d/1iEqeICLm9NcPlOPre4gPrlrwpfbhl129jAYO3TeevHQ/edit)
-- [Demo UI/UX indicativa](https://drive.google.com/file/d/180NRB9OrllOgAS8YcI_23-VM2yTXSgWS/view)
+- [Specifiche v0.10 — sintesi temporanea; copia integrale ancora da importare](docs/Zabbix-Talk-Specifica-v0.10.md)
+- [Demo UI/UX indicativa (HTML completo)](docs/Zabbix-Talk-Demo-UI-UX.html)
 - [Documentazione ufficiale dei moduli Zabbix 7.4](https://www.zabbix.com/documentation/7.4/en/devel/modules/tutorials/module)
+- [Regole di lavoro per l'agent](AGENTS.md)
+- [Skill UI/UX per frontend Zabbix](.agents/skills/zabbix-frontend-ux/SKILL.md)
 
 ## Struttura
 
