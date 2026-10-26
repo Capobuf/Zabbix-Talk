@@ -27,8 +27,8 @@
 2. **Tiny requests without an issue** (e.g. rename one file or folder, fix a label) may be applied directly to `main` when the user requests a small isolated change. Anything material uses a branch. Explicit instructions from the user take priority.
 3. Work on the development Zabbix VM when possible, so the updated UI can be inspected **before any push or PR**. The development VM and frontend can use the active working branch; do not silently switch branches or replace another user's active preview.
 4. When the vertical slice works locally, **stop before pushing**. Give a short report: what was changed, exactly where in the UI, concrete steps A/B/C to try it, the **real verified** UI URL or path if available, the GitHub issue link, branch name, and any known limitations. Ask for feedback on that working version.
-5. Apply requested corrections on the **same branch** and show the updated flow. Do not automatically push, open a PR, merge, or close the issue just because implementation ended.
-6. **Only after the user approves the preview**, push the feature branch and open a focused PR referencing the issue. Merge and close the issue when the user authorizes completion. Do not treat a PR as something that can be "pushed": the branch is pushed, then a PR is created.
+5. Apply requested corrections on the **same branch** and show the updated flow. Implementation ending alone does not authorize publication or completion; the user's approval of the preview does.
+6. **Approval of the preview also authorizes completion:** push the feature branch, open a focused PR referencing the issue, merge it, and close the issue without asking for a second confirmation. A short approval such as "per me ok" is sufficient. Respect any explicit limits the user adds to their approval and complete any required checks before merging. Do not treat a PR as something that can be "pushed": the branch is pushed, then a PR is created.
 7. If local preview cannot be made available, state that limitation and offer the shortest feasible review method rather than inventing a URL.
 
 ## UI/UX
