@@ -16,6 +16,7 @@
             transport: connected && data.notifications.ready,
             prepare_test: connected && data.notifications.ready && !data.notifications.config.fixture,
             problem_test: connected && data.notifications.ready && !!data.notifications.config.fixture,
+            recovery_test: connected && data.notifications.ready && !!data.notifications.config.recovery_enabled && !!data.notifications.config.fixture,
             remove_test: !!data.notifications.config.fixture
         };
         document.querySelectorAll('button[name="operation"]').forEach(button => {

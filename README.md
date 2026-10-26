@@ -2,7 +2,7 @@
 
 Zabbix Talk integra un modulo di configurazione nel frontend Zabbix e un bridge Telegram locale per notifiche e operazioni sugli incidenti.
 
-Le slice [#1](https://github.com/Capobuf/Zabbix-Talk/issues/1) e [#2](https://github.com/Capobuf/Zabbix-Talk/issues/2) sono integrate. Il branch della slice [#3](https://github.com/Capobuf/Zabbix-Talk/issues/3) aggiunge il setup delle notifiche PROBLEM tramite Action nativa e Webhook locale, con test del trasporto e prova tramite evento reale separati.
+Le slice [#1](https://github.com/Capobuf/Zabbix-Talk/issues/1) e [#2](https://github.com/Capobuf/Zabbix-Talk/issues/2) sono integrate. La slice [#3](https://github.com/Capobuf/Zabbix-Talk/issues/3), nella [PR #14](https://github.com/Capobuf/Zabbix-Talk/pull/14), aggiunge il setup delle notifiche PROBLEM tramite Action nativa e Webhook locale. Il branch della slice [#4](https://github.com/Capobuf/Zabbix-Talk/issues/4) include questa dipendenza e aggiunge il RECOVERY sul messaggio originale.
 
 ## Riferimenti di progetto
 
@@ -72,7 +72,7 @@ git pull --ff-only
 sudo ./scripts/install.sh /usr/share/zabbix/ui super
 ```
 
-Il branch della slice corrente è `issue/3-problem-notifications`. Usa `git pull` dopo la pubblicazione del branch e la configurazione dell'upstream, oppure su `main` quando la modifica sarà integrata. Non sovrascrivere modifiche locali. Per modifiche al solo Python basta `sudo systemctl restart zabbix-talk`; per PHP aggiorna la pagina. Quando cambiano unità systemd, socket o permessi, riesegui l’installer. La VM usa il codice del checkout, senza build, container o dipendenze Python esterne.
+Il branch della slice corrente è `issue/4-problem-recovery`, ancora locale durante la revisione. Usa `git pull` dopo la pubblicazione del branch e la configurazione dell'upstream, oppure su `main` quando la modifica sarà integrata. Non sovrascrivere modifiche locali. Per modifiche al solo Python basta `sudo systemctl restart zabbix-talk`; per PHP aggiorna la pagina. Quando cambiano unità systemd, socket o permessi, riesegui l’installer. La VM usa il codice del checkout, senza build, container o dipendenze Python esterne.
 
 ```bash
 systemctl status zabbix-talk --no-pager
@@ -143,7 +143,7 @@ Il nuovo aggiornamento parziale è stato verificato anche fermando e riavviando 
 
 Nella stessa pagina **Zabbix Talk**, il punto **4. Attiva le notifiche reali** permette di scegliere un solo gruppo host, le severità numeriche abilitate e la destinazione Telegram già collegata al punto 2. Le notifiche sono 24/7. Spunta la conferma amministratore e premi **Salva e attiva notifiche**: senza conferma, Super Admin e CSRF l'operazione è rifiutata. Il gruppo include gli host secondo le condizioni native Zabbix, non un filtro aggiuntivo del bridge.
 
-Il modulo crea Media Type **Zabbix Talk - Webhook**, Action **Zabbix Talk - PROBLEM**, utente **zabbix-talk-notify**, gruppo utenti e ruolo **Zabbix Talk - Notify**, macro globale segreta **{$ZABBIX_TALK_CHANNEL_KEY}**. L'utente tecnico ha una password casuale non conservata, frontend disabilitato, API disabilitata e sola lettura sul gruppo scelto. Il suo media è attivo 24/7 per tutte le severità; il filtro delle severità è soltanto nell'Action. L'operazione messaggio ha un solo passo e un solo destinatario, senza recovery o update operations.
+Il modulo crea Media Type **Zabbix Talk - Webhook**, Action **Zabbix Talk - PROBLEM**, utente **zabbix-talk-notify**, gruppo utenti e ruolo **Zabbix Talk - Notify**, macro globale segreta **{$ZABBIX_TALK_CHANNEL_KEY}**. L'utente tecnico ha una password casuale non conservata, frontend disabilitato, API disabilitata e sola lettura sul gruppo scelto. Il suo media è attivo 24/7 per tutte le severità; il filtro delle severità è soltanto nell'Action. L'operazione PROBLEM ha un solo passo e un solo destinatario. La slice #4 aggiunge una recovery operation nativa «Notify all involved» per il destinatario già notificato; nessuna update operation.
 
 Gli ID e lo stato osservato delle risorse sono salvati nella configurazione nativa del modulo nel database Zabbix, insieme alle risorse nella stessa transazione. Il salvataggio concorrente è serializzato sulla riga del modulo. Il salvataggio ripetuto riutilizza gli ID. Prima di aggiornare vengono rilette le risorse: modifiche esterne bloccano la sovrascrittura e sono mostrate in pagina. Un oggetto omonimo non registrato come gestito non viene adottato. Le altre Action e gli altri canali non vengono modificati. Un errore API o di permessi annulla la transazione; nessuna Action viene attivata senza filtro gruppo e almeno una severità.
 
@@ -159,7 +159,7 @@ Il server deve accettare `history.push` dalla sessione amministratore per la pro
 
 Le ultime otto ricevute mostrano separatamente test del trasporto ed eventi, con stato, errore e message_id. Le ricevute persistono dopo riavvio e un eventid già confermato non produce un secondo invio. Il Media Type ha un solo tentativo: in caso di rete interrotta o risposta ambigua il bridge conserva «invio non confermato» e non reinvia automaticamente; controllare Telegram e **Reports → Action log**. Questo evita duplicazioni senza promettere consegna garantita in caso di guasto. Il recupero/reinvio esplicito degli invii incerti non fa parte di questa slice.
 
-Dopo il cambio del bot o del gruppo/topic Telegram, salva nuovamente il punto 4. Fino ad allora il bridge rifiuta gli eventi per la configurazione precedente; nessun instradamento implicito alla nuova chat. Le notifiche RECOVERY, la modifica del messaggio originale e il routing multiplo sono fuori scope.
+Dopo il cambio del bot o del gruppo/topic Telegram, salva nuovamente il punto 4. Fino ad allora il bridge rifiuta nuovi PROBLEM per la configurazione precedente. I RECOVERY di eventi già inviati restano nella destinazione originale, come descritto per la slice #4. Il routing multiplo resta fuori scope.
 
 
 Riferimenti ufficiali per il canale locale: [parametri Webhook e macro](https://www.zabbix.com/documentation/7.4/en/manual/config/notifications/media/webhook), [macro segrete](https://www.zabbix.com/documentation/7.4/en/manual/config/macros/secret_macros), [linee guida Webhook e limiti del test](https://www.zabbix.com/documentation/guidelines/en/webhooks).
@@ -180,3 +180,34 @@ Il 27 ottobre 2026 sono stati verificati nel frontend reale:
 I nove test del bridge sono superati, inclusi topic, riconsegna dopo riavvio, escaping del testo, payload respinto, invio incerto e chiave vuota/non valida. La slice #3 è stata provata dal vivo nel gruppo attualmente collegato senza topic; il caso topic è coperto dai test del bridge e dalle prove Telegram della slice #2, non da un nuovo evento reale della slice #3.
 
 Per ritirare questa slice, disabilitare prima **Zabbix Talk - PROBLEM** in **Alerts → Actions → Trigger actions**, quindi fermare/rimuovere il bridge o tornare alla revisione precedente. Il rollback del servizio conserva le risorse Zabbix e lo stato locale; non elimina automaticamente Action, account o macro.
+
+### Ripristino sul messaggio originale (slice #4)
+
+Al punto **4. Attiva le notifiche reali**, conferma e premi **Salva e attiva notifiche** per aggiornare le risorse gestite esistenti. Gli ID restano invariati e il controllo delle modifiche esterne rimane attivo. Il Media Type distingue `problem` e `recovery` tramite `{ALERT.MESSAGE}`; i dati del ripristino usano `{EVENT.RECOVERY.ID}`, `{EVENT.RECOVERY.VALUE}`, data e ora native. La recovery operation notifica chi ha ricevuto il PROBLEM; Zabbix decide quando il problema è risolto.
+
+Il bridge conserva in SQLite eventid, hostid, identità del bot, chat/topic, message_id e contenuto originale. Al RECOVERY chiama `editMessageText` con `rich_message` sullo stesso messaggio: titolo **RISOLTO**, inizio e ripristino Zabbix, ID degli eventi. Per la severità originale 4/5 (High/Disaster) invia poi un solo Rich Message **RIPRISTINO** nella stessa chat/topic; per 0–3 esegue solo la modifica, senza un nuovo messaggio.
+
+Per provare il flusso dalla pagina:
+
+1. Al punto 5 crea l’host isolato, attendi l’aggiornamento della cache Zabbix e genera il PROBLEM. Premi **Aggiorna stato** finché compare la ricevuta e controlla Telegram.
+2. Premi **Genera RECOVERY di prova**. Il valore 0 va all’item trapper; attendi l’elaborazione e aggiorna lo stato. Confronta eventid PROBLEM/RECOVERY e message_id originale. Per Alta/Disastro la ricevuta mostra anche il nuovo message_id di ripristino.
+3. Per verificare la sola modifica, rimuovi l’host, abilita una severità 0–3 al punto 4 e ricrea la prova. Il test usa sempre la massima severità selezionata. Al termine genera il RECOVERY prima di rimuovere l’host e ripristina le severità desiderate.
+
+Le associazioni e la deduplicazione di entrambi gli eventi sopravvivono al riavvio. Un cambio della destinazione Telegram non sposta i vecchi messaggi: anche il messaggio aggiuntivo va nella chat/topic originale. Il bot deve restare lo stesso e poter operare nella vecchia destinazione; un cambio bot viene segnalato senza usare il nuovo bot per modificare messaggi altrui.
+
+Le ricevute precedenti alla slice #4 restano consultabili; non contengono tutti i dati necessari al RECOVERY e non vengono ricostruite per supposizione. Per questi eventi il ripristino è rifiutato con errore visibile nell’Action log. Nessun messaggio sostitutivo se manca l’originale. In caso di messaggio eliminato o errore Telegram, la ricevuta non dichiara successo. Se l’originale è stato aggiornato ma il nuovo ripristino non è confermato, il dettaglio distingue i due esiti. Prima di ogni chiamata è salvato lo stato in corso: dopo errori o interruzioni non si ritenta automaticamente, evitando doppi invii; controlla Telegram e **Reports → Action log**.
+
+Riferimenti ufficiali: [recovery operation](https://www.zabbix.com/documentation/7.4/en/manual/api/reference/action/object#action-recovery-operation), [macro evento e ripristino](https://www.zabbix.com/documentation/7.4/en/manual/appendix/macros/supported_by_location), [editMessageText](https://core.telegram.org/bots/api#editmessagetext).
+
+#### Prove della slice #4 sulla VM
+
+Il 26 ottobre 2026 (27 ottobre nell’orario del frontend) sono stati verificati dal browser nel frontend reale e tramite Bot API:
+
+- PROBLEM Disaster `8676`, host isolato `10812`, trigger `34567` → Rich Message `25`. Dopo riavvio del bridge, RECOVERY nativo `8677` → modifica confermata dello stesso messaggio `25` e singolo nuovo ripristino `26`. Riconsegna autenticata del RECOVERY → `duplicate: true`, stessi ID, nessun nuovo invio.
+- PROBLEM Media `8679`, host isolato `10814`, trigger `34569` → messaggio `27`; RECOVERY `8680` → modifica confermata di `27`, senza messaggio aggiuntivo.
+- Salvataggi ripetuti riutilizzano Media Type `110`, Action `15`, utente `5`, gruppo utenti `16`, ruolo `6`, macro `4`. Una sola recovery operation nativa «Notify all involved». Il timeout Webhook è 30 secondi per consentire le due chiamate Telegram del recovery 4/5.
+- Aggiornamento parziale di eventi/ricevute conserva il testo del token non ancora inviato; nessun errore JavaScript osservato. Controllata la sezione di collaudo su desktop e a 1024 px, con lo scorrimento orizzontale nativo sotto la larghezza minima Zabbix.
+
+I 14 test del bridge sono superati: includono tutte le severità 0–5, destinazione originale dopo cambio chat/topic, deduplicazione dopo riavvio, originale eliminato, fallimento del solo messaggio aggiuntivo e migrazione delle ricevute della slice #3. Le prove reali usano il gruppo collegato senza topic; topic e cambio destinazione sono verificati con risposte API controllate. Le prove non configurano un secondo gruppo Telegram.
+
+Gli host di collaudo sono stati rimossi dalla pagina e le severità ripristinate a 2, 3, 4, 5. Le risorse gestite restano attive per la revisione; le ricevute conservano gli esiti. La PR #14 della dipendenza #3 è ancora aperta; la slice #4 resta sul branch locale fino all’approvazione dell’anteprima.

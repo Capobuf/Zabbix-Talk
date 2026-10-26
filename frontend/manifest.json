@@ -3,7 +3,7 @@
   "id": "zabbix-talk",
   "name": "Zabbix Talk",
   "namespace": "ZabbixTalk",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Telegram operations for Zabbix monitoring.",
   "actions": {
     "zabbix.talk.overview": {
