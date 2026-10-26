@@ -2,13 +2,17 @@
 
 namespace Modules\ZabbixTalk\Actions;
 
+use API;
 use CController;
 use CControllerResponseData;
 use CWebUser;
 use Modules\ZabbixTalk\BridgeClient;
 use RuntimeException;
+use Throwable;
+use Modules\ZabbixTalk\Notifications;
 
 require_once __DIR__.'/../includes/BridgeClient.php';
+require_once __DIR__.'/../includes/Notifications.php';
 
 class Overview extends CController {
     public function init(): void {
@@ -68,6 +72,32 @@ class Overview extends CController {
             foreach (['bot', 'polling', 'verified', 'destination', 'topic', 'test', 'updated'] as $label) {
                 $data['labels'][$label] = _('Stato non disponibile: verifica il bridge.');
             }
+        }
+        try {
+            $notifications = new Notifications();
+            $data['notifications'] = $notifications->status($status);
+            $data['labels']['notification_setup'] = $data['notifications']['message'];
+            $data['labels']['problem_test'] = $notifications->testStatus();
+            $receipts = [];
+            foreach ($status['notifications'] ?? [] as $receipt) {
+                $receipts[] = ($receipt['kind'] === 'transport' ? 'TEST TRASPORTO' : 'PROBLEM')
+                    .' · eventid '.$receipt['eventid'].' · '.$receipt['host'].' · '
+                    .(['sent' => _('Inviato'), 'sending' => _('Invio in corso o interrotto'),
+                        'unconfirmed' => _('Invio non confermato')][$receipt['status']] ?? $receipt['status'])
+                    .($receipt['message_id'] ? ' · message_id '.$receipt['message_id'] : '')
+                    .' · '.zbx_date2str(DATE_TIME_FORMAT_SECONDS, $receipt['updated_at']).' · '.$receipt['detail'];
+            }
+            $data['labels']['notification_receipts'] = $bridge_error !== '' ? _('Ricevute non disponibili: verifica il bridge.')
+                : ($receipts ? implode("\n", $receipts) : _('Nessun evento ricevuto dal bridge.'));
+            $data['hostgroups'] = $this->getAction() === 'zabbix.talk.status' ? []
+                : API::HostGroup()->get(['output' => ['groupid', 'name'], 'sortfield' => 'name']);
+        }
+        catch (Throwable $error) {
+            $data['notifications'] = ['config' => [], 'ready' => false];
+            $data['hostgroups'] = [];
+            $data['labels']['notification_setup'] = $error->getMessage();
+            $data['labels']['problem_test'] = _('Stato del test non disponibile.');
+            $data['labels']['notification_receipts'] = _('Diagnostica non disponibile.');
         }
         $this->setResponse(new CControllerResponseData($this->getAction() === 'zabbix.talk.status'
             ? ['main_block' => json_encode($data)] : $data));

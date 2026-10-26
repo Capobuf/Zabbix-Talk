@@ -11,7 +11,12 @@
             verify: connected && !!state.bot,
             register: connected && !!state.bot,
             send: connected && !!state.destination,
-            edit: connected && !!state.test
+            edit: connected && !!state.test,
+            provision: connected && !!state.destination,
+            transport: connected && data.notifications.ready,
+            prepare_test: connected && data.notifications.ready && !data.notifications.config.fixture,
+            problem_test: connected && data.notifications.ready && !!data.notifications.config.fixture,
+            remove_test: !!data.notifications.config.fixture
         };
         document.querySelectorAll('button[name="operation"]').forEach(button => {
             button.disabled = !allowed[button.value];
@@ -63,6 +68,14 @@
         }
     }));
 
+    const setup = document.getElementById('talk-notifications');
+    setup.addEventListener('submit', event => {
+        if (!document.getElementById('confirm').checked) {
+            event.preventDefault();
+            feedback.textContent = <?= json_encode(_('Seleziona la conferma amministratore prima di attivare le notifiche.')) ?>;
+            document.getElementById('confirm').focus();
+        }
+    });
     const copy = document.getElementById('talk-copy');
     copy.addEventListener('click', async () => {
         const message = document.getElementById('talk-copy-feedback');

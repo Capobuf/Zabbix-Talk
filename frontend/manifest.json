@@ -3,7 +3,7 @@
   "id": "zabbix-talk",
   "name": "Zabbix Talk",
   "namespace": "ZabbixTalk",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Telegram operations for Zabbix monitoring.",
   "actions": {
     "zabbix.talk.overview": {
@@ -16,6 +16,9 @@
     "zabbix.talk.status": {
       "class": "Overview",
       "layout": "layout.json"
+    },
+    "zabbix.talk.configure": {
+      "class": "Configure"
     }
   }
 }

@@ -109,6 +109,54 @@ class TelegramFlowTest(unittest.TestCase):
             self.assertEqual(api.call_count, 1)
         self.assertGreater(self.bridge.status()['retry_after'], 0)
 
+    def notification(self, **changes):
+        return dict({'kind': 'problem', 'eventid': '99', 'hostid': '17', 'host': '<test & host>',
+                     'problem': '<b>literal problem</b>', 'severity': '4',
+                     'occurred_at': '2026-10-27 00:00:00', 'event_value': '1',
+                     'bot_id': '123456', 'chat_id': '-1001', 'message_thread_id': '17'}, **changes)
+
+    def test_notification_is_escaped_persistent_and_delivered_once(self):
+        self.register(17)
+        self.bridge.notify(self.notification())
+        self.bridge = Bridge(self.path)
+        self.assertTrue(self.bridge.notify(self.notification())['duplicate'])
+        writes = [params for method, params in self.calls if method == 'sendRichMessage']
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(writes[0]['message_thread_id'], 17)
+        self.assertIn('&lt;b&gt;literal problem&lt;/b&gt;', writes[0]['rich_message']['html'])
+        self.assertEqual(self.bridge.status()['notifications'][0]['message_id'], 42)
+        self.assertNotIn(self.token, json.dumps(self.bridge.status()))
+
+    def test_notification_rejects_bad_payload_and_changed_bot(self):
+        self.register()
+        for changes in [{'severity': '6'}, {'event_value': '0'}, {'eventid': '{EVENT.ID}'},
+                        {'host': []}, {'bot_id': '999'}, {'message_thread_id': '-1'}]:
+            with self.assertRaises(BridgeError):
+                self.bridge.notify(self.notification(**changes))
+        self.assertFalse(any(method == 'sendRichMessage' for method, _ in self.calls))
+
+    def test_uncertain_notification_does_not_retry_and_channel_is_private(self):
+        key = self.bridge.channel()['key']
+        self.assertFalse(self.bridge.authorized(''))
+        self.assertFalse(self.bridge.authorized('Bearer wrong'))
+        self.assertTrue(self.bridge.authorized('Bearer ' + key))
+        self.assertEqual(self.bridge.channel_path.stat().st_mode & 0o777, 0o600)
+        self.assertNotIn(key, json.dumps(self.bridge.status()))
+        self.bridge.channel_path.write_text('')
+        self.assertFalse(self.bridge.authorized('Bearer '))
+        with self.assertRaises(BridgeError):
+            self.bridge.channel()
+        self.bridge.channel_path.write_text(key)
+        self.register(17)
+        with patch('bridge.server.telegram', side_effect=BridgeError('Network interrupted')) as api:
+            with self.assertRaises(BridgeError):
+                self.bridge.notify(self.notification())
+            self.bridge = Bridge(self.path)
+            with self.assertRaisesRegex(BridgeError, 'già tentato'):
+                self.bridge.notify(self.notification())
+            self.assertEqual(api.call_count, 1)
+        self.assertEqual(self.bridge.status()['notifications'][0]['status'], 'unconfirmed')
+
 
 if __name__ == '__main__':
     unittest.main()
