@@ -1,0 +1,31 @@
+# Managed by Zabbix Talk scripts/install.sh
+[Unit]
+Description=Zabbix Talk local bridge
+After=network.target
+
+[Service]
+Type=exec
+User=zabbix-talk
+Group=zabbix-talk
+ExecStart=/usr/bin/python3 -I -B /opt/zabbix-talk/bridge/server.py
+WorkingDirectory=/var/lib/zabbix-talk
+Restart=on-failure
+RestartSec=3
+StateDirectory=zabbix-talk
+StateDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_UNIX
+CapabilityBoundingSet=
+ReadOnlyPaths=/etc/zabbix-talk
+
+[Install]
+WantedBy=multi-user.target
