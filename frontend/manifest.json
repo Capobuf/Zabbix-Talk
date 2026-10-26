@@ -1,0 +1,14 @@
+{
+  "manifest_version": 2.0,
+  "id": "zabbix-talk",
+  "name": "Zabbix Talk",
+  "namespace": "ZabbixTalk",
+  "version": "0.1.0",
+  "description": "Telegram operations for Zabbix monitoring.",
+  "actions": {
+    "zabbix.talk.overview": {
+      "class": "Overview",
+      "view": "zabbix.talk.overview"
+    }
+  }
+}
