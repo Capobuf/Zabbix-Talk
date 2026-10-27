@@ -61,7 +61,7 @@ class TelegramFlowTest(unittest.TestCase):
         self.assertEqual([method for method, _ in writes], ['sendRichMessage', 'editMessageText'])
         self.assertEqual(writes[0][1]['message_thread_id'], 17)
         self.assertEqual(writes[1][1]['message_id'], 42)
-        self.assertIn('TEST Zabbix Talk', writes[0][1]['rich_message']['html'])
+        self.assertIn('TEST TRASPORTO', writes[0][1]['rich_message']['html'])
         self.assertEqual(self.bridge.status()['test']['message_id'], 42)
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         self.assertNotIn(self.token, json.dumps(self.bridge.status()))
@@ -128,8 +128,39 @@ class TelegramFlowTest(unittest.TestCase):
         self.assertEqual(len(writes), 1)
         self.assertEqual(writes[0]['message_thread_id'], 17)
         self.assertIn('&lt;b&gt;literal problem&lt;/b&gt;', writes[0]['rich_message']['html'])
+        self.assertTrue(writes[0]['rich_message']['html'].startswith('<h3>🔴 &lt;test &amp; host&gt;</h3>'))
+        self.assertIn('<blockquote><p>&lt;b&gt;literal problem&lt;/b&gt;</p></blockquote>', writes[0]['rich_message']['html'])
+        self.assertTrue(writes[0]['rich_message']['html'].endswith('<footer>Inizio | 27/10 | 00:00</footer>'))
+        self.assertNotIn('Host ID', writes[0]['rich_message']['html'])
+        self.assertNotIn('Evento:', writes[0]['rich_message']['html'])
         self.assertEqual(self.bridge.status()['notifications'][0]['message_id'], 42)
         self.assertNotIn(self.token, json.dumps(self.bridge.status()))
+
+    def test_critical_presentation_keeps_original_data_for_recovery(self):
+        self.register(17)
+        host = 'SW-MILANO-PRODUZIONE-ARMADIO-NORD-ACCESSO-03'
+        problem = 'Interfaccia <uplink> & rete: ' + 'descrizione completa ' * 90
+        for severity in (4, 5):
+            with self.subTest(severity=severity):
+                event = self.notification(eventid=str(400 + severity), severity=str(severity),
+                                          host=host, problem=problem, occurred_at='2026.10.27 00:57:23')
+                original = dict(event)
+                self.bridge.notify(event)
+                content = self.calls[-1][1]['rich_message']['html']
+                self.assertTrue(content.startswith('<h3>🔴 SW-MILANO-…-ACCESSO-03</h3>'))
+                self.assertIn('<blockquote><p>Interfaccia &lt;uplink&gt; &amp; rete: ' + 'descrizione completa ' * 90 + '</p></blockquote>', content)
+                self.assertTrue(content.endswith('<footer>Inizio | 27/10 | 00:57</footer>'))
+                for omitted in ('PROBLEMA', 'High', 'Disaster', 'details', 'button', 'callback', 'Host ID', 'Evento:'):
+                    self.assertNotIn(omitted, content)
+                self.assertEqual(event, original)
+                with self.bridge.receipts() as db:
+                    stored = db.execute('SELECT host,payload FROM receipts WHERE eventid=?', (event['eventid'],)).fetchone()
+                self.assertEqual(stored[0], host)
+                self.assertEqual(json.loads(stored[1])['host'], host)
+                self.assertEqual(json.loads(stored[1])['occurred_at'], '2026.10.27 00:57:23')
+                self.bridge.notify(self.recovery(eventid=event['eventid']))
+                self.assertNotIn('SW-MILANO', self.calls[-1][1]['rich_message']['html'])
+                self.assertTrue(self.calls[-1][1]['rich_message']['html'].startswith('<h3>🟢 RISOLTO</h3>'))
 
     def test_notification_rejects_bad_payload_and_changed_bot(self):
         self.register()
@@ -138,6 +169,55 @@ class TelegramFlowTest(unittest.TestCase):
             with self.assertRaises(BridgeError):
                 self.bridge.notify(self.notification(**changes))
         self.assertFalse(any(method == 'sendRichMessage' for method, _ in self.calls))
+
+    def test_long_names_and_update_presentation_do_not_change_event_support(self):
+        host = 'Sede Milano · ' + 'R' * 241
+        problem = 'Spazio disponibile < 10% & volume dati: ' + 'è' * 2000
+        data = self.notification(kind='update', host=host, problem=problem, severity='2', severity_name='Attenzione')
+        rich = Bridge.event_message(data)
+        self.assertTrue(rich['html'].startswith('<h3>🟡 Sede Milan-…-' + 'R' * 10 + '</h3>'))
+        self.assertIn('<p><b>AGGIORNAMENTO</b></p><blockquote><p>', rich['html'])
+        self.assertIn('Spazio disponibile &lt; 10% &amp; volume dati: ' + 'è' * 2000, rich['html'])
+        self.assertTrue(rich['skip_entity_detection'])
+        with self.assertRaisesRegex(BridgeError, 'Tipo o valore evento'):
+            self.bridge.notify(data)
+
+    def test_recovery_shows_resolved_state_and_uses_native_duration(self):
+        self.register(17)
+        self.bridge.notify(self.notification(severity_name='Critica <rete>'))
+        self.bridge = Bridge(self.path)
+        self.bridge.notify(self.recovery(severity='0', severity_name='Non classificato', duration='12m 08s'))
+        for method, params in self.calls:
+            if method == 'editMessageText' or (method == 'sendRichMessage' and 'RISOLTO' in params['rich_message']['html']):
+                content = params['rich_message']['html']
+                self.assertTrue(content.startswith('<h3>🟢 RISOLTO</h3><blockquote>'))
+                self.assertNotIn('&lt;test &amp; host&gt;', content)
+                self.assertNotIn('✓', content)
+                self.assertIn('<br>Durata | 12 min 8 s', content)
+                self.assertNotIn('99', content)
+                self.assertNotIn('100', content)
+        for missing in ('', '{EVENT.DURATION}', '*UNKNOWN*'):
+            content = Bridge.event_message(self.notification(severity_name='{EVENT.SEVERITY}'),
+                                           self.recovery(duration=missing))['html']
+            self.assertNotIn('Durata', content)
+            self.assertNotIn('{EVENT.', content)
+            self.assertIn('<h3>🟢 ', content)
+        transport = Bridge.event_message(self.notification(kind='transport'))['html']
+        self.assertEqual(transport, '<h3>TEST TRASPORTO</h3><blockquote><p>Verifica Media Type → bridge → Telegram</p></blockquote>')
+
+    def test_temporal_metadata_formats_dates_and_preserves_unknown_formats(self):
+        event = self.notification(occurred_at='2026.10.26 23:59:10')
+        for recovered_at, expected in [('2026.10.26 23:59:58', '23:59'),
+                                       ('2026-10-27 00:01:18', '27/10 | 00:01')]:
+            content = Bridge.event_message(event, self.recovery(recovered_at=recovered_at, duration='2m 08s'))['html']
+            self.assertNotIn('<details>', content)
+            self.assertTrue(content.endswith('</footer>'))
+            self.assertIn('<footer>26/10 | 23:59 → ' + expected + '<br>Durata | 2 min 8 s', content)
+        content = Bridge.event_message(self.notification(occurred_at='custom <date>'),
+                                       self.recovery(recovered_at='custom <recovery>', duration='custom <duration>'))['html']
+        self.assertIn('custom &lt;date&gt;', content)
+        self.assertIn('custom &lt;recovery&gt;', content)
+        self.assertIn('custom &lt;duration&gt;', content)
 
     def test_uncertain_notification_does_not_retry_and_channel_is_private(self):
         key = self.bridge.channel()['key']
@@ -171,6 +251,8 @@ class TelegramFlowTest(unittest.TestCase):
             with self.subTest(severity=severity):
                 eventid = str(200 + severity)
                 original = self.bridge.notify(self.notification(eventid=eventid, severity=str(severity)))
+                self.assertTrue(self.calls[-1][1]['rich_message']['html'].startswith(
+                    '<h3>' + ['⚪', '🔵', '🟡', '🟠'][severity] + ' '))
                 before = len(self.calls)
                 result = self.bridge.notify(self.recovery(eventid=eventid, severity=str(severity)))
                 writes = [(method, params) for method, params in self.calls[before:]]
@@ -202,7 +284,9 @@ class TelegramFlowTest(unittest.TestCase):
                 self.assertEqual(writes[0][1]['message_id'], original['message_id'])
                 self.assertEqual(writes[1][1]['chat_id'], -1001)
                 self.assertEqual(writes[1][1]['message_thread_id'], 17)
-                self.assertIn('RIPRISTINO', writes[1][1]['rich_message']['html'])
+                self.assertEqual(writes[1][1]['reply_parameters'], {'message_id': original['message_id']})
+                self.assertIn('RISOLTO', writes[1][1]['rich_message']['html'])
+                self.assertEqual(writes[0][1]['rich_message'], writes[1][1]['rich_message'])
                 self.assertNotEqual(result['recovery_message_id'], original['message_id'])
                 self.assertEqual(self.bridge.status()['notifications'][0]['status'], 'sent')
 
