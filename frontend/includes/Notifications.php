@@ -156,7 +156,8 @@ class Notifications {
     private function parameters(array $destination, array $bot): array {
         $values = ['channel_key' => '{$ZABBIX_TALK_CHANNEL_KEY}', 'kind' => '{ALERT.MESSAGE}', 'eventid' => '{EVENT.ID}',
             'event_value' => '{EVENT.VALUE}', 'hostid' => '{HOST.ID}', 'host' => '{HOST.NAME}',
-            'problem' => '{EVENT.NAME}', 'severity' => '{EVENT.NSEVERITY}',
+            'problem' => '{EVENT.NAME}', 'severity' => '{EVENT.NSEVERITY}', 'severity_name' => '{EVENT.SEVERITY}',
+            'duration' => '{EVENT.DURATION}',
             'recovery_eventid' => '{EVENT.RECOVERY.ID}', 'recovery_value' => '{EVENT.RECOVERY.VALUE}',
             'recovered_at' => '{EVENT.RECOVERY.DATE} {EVENT.RECOVERY.TIME}',
             'occurred_at' => '{EVENT.DATE} {EVENT.TIME}', 'bot_id' => (string) $bot['id'],

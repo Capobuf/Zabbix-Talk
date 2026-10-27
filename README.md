@@ -113,7 +113,7 @@ Le verifiche browser usano strumenti temporanei fuori dal checkout; non sono dip
 
 1. Apri **Zabbix Talk** come Super Admin tramite HTTPS (il virtual host configurato è `https://zabbix.nirolabel.it/zabbix/`; richiede risoluzione del nome dal client). Inserisci il token di un bot dedicato e premi **Salva e verifica bot**. Il campo torna vuoto anche in caso di errore. Un token errato non sostituisce la configurazione funzionante. Cambiare bot azzera destinazione e test; salvare lo stesso token li conserva.
 2. Aggiungi il bot a un gruppo esistente e consentigli di inviare messaggi. Nel passaggio **2. Collega il gruppo o il topic**, premi **Genera comando di collegamento**, poi **Copia comando**. La pagina conferma la copia tramite il controllo clipboard nativo Zabbix. Incolla e invia esattamente il comando, compreso `@username`, nel gruppo o nel topic esistente scelto, dal tuo account di amministratore Telegram. Il codice è monouso, scade dopo dieci minuti e viene invalidato al riavvio. Poi premi **Ho inviato il comando: aggiorna collegamento**: lo stato cambia senza ricaricare la pagina. L'ID del topic viene ricavato dal messaggio; la UI mostra l'ID effettivo senza inventare un nome o enumerare topic. Per un gruppo senza topic, il thread è assente. La slice conserva una destinazione per volta; collegarne una diversa azzera l'ultimo test.
-3. Premi **Verifica collegamento e permessi**, poi **Invia notifica di prova**: il bridge chiama `sendRichMessage` con `rich_message.html` marcato **TEST Zabbix Talk**. Annota il `message_id` restituito dalla pagina e controlla Telegram. Premi **Aggiorna notifica di prova**: viene chiamato solo `editMessageText` con `rich_message` sullo stesso ID. Ogni modifica incrementa la revisione visibile. Un nuovo invio crea un nuovo test, senza cancellare lo storico della chat.
+3. Premi **Verifica collegamento e permessi**, poi **Invia notifica di prova**: il bridge chiama `sendRichMessage` con `rich_message.html` marcato **TEST TRASPORTO**. Annota il `message_id` restituito dalla pagina e controlla Telegram. Premi **Aggiorna notifica di prova**: viene chiamato solo `editMessageText` con `rich_message` sullo stesso ID. Ogni modifica incrementa la revisione visibile. Un nuovo invio crea un nuovo test, senza cancellare lo storico della chat.
 
 Per verificare entrambi i casi, collega prima un gruppo senza topic, esegui invio/modifica, poi collega un topic esistente e ripeti. Eliminando manualmente l'ultimo test in Telegram, **Aggiorna notifica di prova** deve mostrare l'errore API reale senza inviare un messaggio sostitutivo. Non servono Media Type, utenti tecnici o Action Zabbix.
 
@@ -147,7 +147,7 @@ Il modulo crea Media Type **Zabbix Talk - Webhook**, Action **Zabbix Talk - PROB
 
 Gli ID e lo stato osservato delle risorse sono salvati nella configurazione nativa del modulo nel database Zabbix, insieme alle risorse nella stessa transazione. Il salvataggio concorrente è serializzato sulla riga del modulo. Il salvataggio ripetuto riutilizza gli ID. Prima di aggiornare vengono rilette le risorse: modifiche esterne bloccano la sovrascrittura e sono mostrate in pagina. Un oggetto omonimo non registrato come gestito non viene adottato. Le altre Action e gli altri canali non vengono modificati. Un errore API o di permessi annulla la transazione; nessuna Action viene attivata senza filtro gruppo e almeno una severità.
 
-Il Webhook usa `HttpRequest` del server Zabbix e invia i soli dati necessari su loopback, con autenticazione Bearer. Nessuna chiamata Telegram proviene dal Media Type. Il bridge usa `sendRichMessage` e mostra host, problema, severità, data/ora Zabbix, eventid e hostid; i testi sono escapati prima di comporre l'HTML. La chiave di canale non è restituita dal frontend, dai messaggi o dalla diagnostica del bridge. La macro di tipo Secret text non restituisce il valore tramite API/UI e Zabbix ne maschera l'audit. La configurazione del modulo conserva soltanto i metadati della macro, mai il valore. Non registrare i parametri risolti nel debug del Webhook. Il test del trasporto recupera la chiave soltanto dal socket protetto, perché il test nativo non espande le macro.
+Il Webhook usa `HttpRequest` del server Zabbix e invia i soli dati necessari su loopback, con autenticazione Bearer. Nessuna chiamata Telegram proviene dal Media Type. Il bridge usa `sendRichMessage` e mostra host, problema, gravità e data/ora Zabbix; eventid e hostid rimangono interni. I testi sono escapati prima di comporre l'HTML. La chiave di canale non è restituita dal frontend, dai messaggi o dalla diagnostica del bridge. La macro di tipo Secret text non restituisce il valore tramite API/UI e Zabbix ne maschera l'audit. La configurazione del modulo conserva soltanto i metadati della macro, mai il valore. Non registrare i parametri risolti nel debug del Webhook. Il test del trasporto recupera la chiave soltanto dal socket protetto, perché il test nativo non espande le macro.
 
 Il punto **5. Verifica trasporto ed evento reale** offre due prove distinte:
 
@@ -185,7 +185,7 @@ Per ritirare questa slice, disabilitare prima **Zabbix Talk - PROBLEM** in **Ale
 
 Al punto **4. Attiva le notifiche reali**, conferma e premi **Salva e attiva notifiche** per aggiornare le risorse gestite esistenti. Gli ID restano invariati e il controllo delle modifiche esterne rimane attivo. Il Media Type distingue `problem` e `recovery` tramite `{ALERT.MESSAGE}`; i dati del ripristino usano `{EVENT.RECOVERY.ID}`, `{EVENT.RECOVERY.VALUE}`, data e ora native. La recovery operation notifica chi ha ricevuto il PROBLEM; Zabbix decide quando il problema è risolto.
 
-Il bridge conserva in SQLite eventid, hostid, identità del bot, chat/topic, message_id e contenuto originale. Al RECOVERY chiama `editMessageText` con `rich_message` sullo stesso messaggio: titolo **RISOLTO**, inizio e ripristino Zabbix, ID degli eventi. Per la severità originale 4/5 (High/Disaster) invia poi un solo Rich Message **RIPRISTINO** nella stessa chat/topic; per 0–3 esegue solo la modifica, senza un nuovo messaggio.
+Il bridge conserva in SQLite eventid, hostid, identità del bot, chat/topic, message_id e contenuto originale. Al RECOVERY chiama `editMessageText` con `rich_message` sullo stesso messaggio: titolo **🟢 RISOLTO**, inizio e ripristino Zabbix, durata quando disponibile. Gli ID restano interni. Per la severità originale 4/5 (High/Disaster) invia poi un solo Rich Message **RISOLTO** nella stessa chat/topic, come risposta Telegram al messaggio originale; per 0–3 esegue solo la modifica, senza un nuovo messaggio.
 
 Per provare il flusso dalla pagina:
 
@@ -211,3 +211,43 @@ Il 26 ottobre 2026 (27 ottobre nell’orario del frontend) sono stati verificati
 I 14 test del bridge sono superati: includono tutte le severità 0–5, destinazione originale dopo cambio chat/topic, deduplicazione dopo riavvio, originale eliminato, fallimento del solo messaggio aggiuntivo e migrazione delle ricevute della slice #3. Le prove reali usano il gruppo collegato senza topic; topic e cambio destinazione sono verificati con risposte API controllate. Le prove non configurano un secondo gruppo Telegram.
 
 Gli host di collaudo sono stati rimossi dalla pagina e le severità ripristinate a 2, 3, 4, 5. Le risorse gestite restano attive per la revisione; le ricevute conservano gli esiti. La PR #14 della dipendenza #3 è ancora aperta; la slice #4 resta sul branch locale fino all’approvazione dell’anteprima.
+
+### Stile delle notifiche Telegram — issue #16
+
+La [issue #16](https://github.com/Capobuf/Zabbix-Talk/issues/16), sviluppata sul branch `issue/16-telegram-notification-style`, introduce il formato approvato dall’utente nel client Telegram, inclusi gli altri tipi di notifica e il RECOVERY compatto.
+
+I **PROBLEM di tutte le severità** mostrano LED e host come titolo `h3`, descrizione completa in `blockquote` e orario nel `footer`. L’host ha maggiore rilievo tipografico del problema. I LED standard sono ⚪, 🔵, 🟡, 🟠, 🔴, 🔴 per le severità 0–5. Non compaiono etichette ridondanti di gravità, identificativi tecnici o pulsanti. Dimensioni e aspetto dei blocchi sono gestiti dal client Telegram.
+
+Gli hostname oltre 32 caratteri sono abbreviati solo nella presentazione: primi 10 e ultimi 10 caratteri, con `-…-` al centro e rimozione dei separatori duplicati alle giunzioni. Per esempio, `SW-MILANO-PRODUZIONE-ARMADIO-NORD-ACCESSO-03` diventa `SW-MILANO-…-ACCESSO-03`. Il nome originale rimane nei dati e nelle ricevute. La larghezza e il ritorno a capo restano decisi dal client Telegram; non è garantita una sola riga.
+
+Il footer formatta esclusivamente gli orari ricevuti da Zabbix, senza conversioni di fuso: `Inizio | 27/10 | 03:34`. Anno e secondi restano nei dati originali. Per il RECOVERY mostra `27/10 | 03:34 → 03:36`; se cambia giorno, include anche la seconda data, per esempio `26/10 | 23:59 → 27/10 | 00:01`. I formati temporali non riconosciuti sono conservati e sottoposti a escaping come gli altri testi. Il rilevamento automatico di link e menzioni resta disabilitato.
+
+Il **RECOVERY** usa il titolo **🟢 RISOLTO**, senza hostname né segno di spunta; il footer conserva la durata quando disponibile da Zabbix. Il messaggio originale viene aggiornato. Il messaggio aggiuntivo previsto per High/Disaster usa `reply_parameters.message_id` per rispondere all’originale; le severità 0–3 restano con sola modifica. **UPDATE** usa la stessa struttura con **AGGIORNAMENTO**: è solo un rendering, il canale operativo continua a rifiutarlo. **TEST TRASPORTO** usa titolo e citazione per lo scopo della verifica, senza host o orari inventati; la modifica mostra la revisione nel footer. Action, routing e decisioni sugli eventi restano quelli esistenti.
+
+Su richiesta dell’utente sono stati eliminati sia il set Telegram della custom emoji sia i relativi file locali; la cancellazione del set è stata confermata dall’API. Non viene utilizzato alcun effetto luminoso CSS o animato. Titolo, citazione e footer sono elementi Rich HTML nativi, non effetti della demo HTML.
+
+Riferimenti: [Rich HTML ufficiale Telegram](https://core.telegram.org/bots/api#rich-html-style), [sendRichMessage](https://core.telegram.org/bots/api#sendrichmessage), [ReplyParameters](https://core.telegram.org/bots/api#replyparameters).
+
+#### Prova e revisione sulla VM
+
+Nel gruppo Telegram collegato **test-bot** sono disponibili gli esempi aggiornati con dati storici letti da Zabbix. Host, descrizione, gravità e orari sono quelli effettivi; la data è stata verificata nella pagina nativa degli eventi, nel fuso mostrato dal frontend.
+
+| Esempio | Footer | Evento Zabbix | Messaggio Telegram |
+| --- | --- | --- | --- |
+| NAS-2, risolto dopo indisponibilità ICMP | 27/10 \| 03:34 → 03:36 | [8782](https://zabbix.nirolabel.it/zabbix/tr_events.php?triggerid=33638&eventid=8782), ripristino 8783 | 66 risposta al PROBLEM 59 |
+| NAS-1, Faulty state of volume 3 | Inizio \| 27/10 \| 02:01 | [8735](https://zabbix.nirolabel.it/zabbix/tr_events.php?triggerid=33716&eventid=8735) | 60 |
+| NAS-1, Faulty state of volume 4 | Inizio \| 12/10 \| 02:01 | [3035](https://zabbix.nirolabel.it/zabbix/tr_events.php?triggerid=33717&eventid=3035) | 61 |
+| Zabbix server, utilizzo icmp pinger oltre 75%, severità Media | Inizio \| 27/10 \| 22:35 | 8906 | 62; 64 per il solo rendering UPDATE |
+| Test del collegamento | Revisione \| 1 | Nessun evento | 65 |
+
+Gli esempi storici non hanno generato eventi, eseguito Action o inserito ricevute operative. Il test 58 è stato inviato e modificato tramite il bridge in esecuzione. Il gruppo privato non offre link pubblici ai singoli messaggi; gli esempi precedenti restano nello storico della chat.
+
+Per la revisione dal telefono:
+
+1. Apri **test-bot** e confronta i messaggi **NAS-1**: LED accanto all’host, problema nella citazione e data senza anno nel footer.
+2. Controlla **NAS-2**, con titolo **🟢 RISOLTO**, intervallo compatto e risposta al messaggio originale.
+3. Confronta **Zabbix server**, **AGGIORNAMENTO** e **TEST TRASPORTO** per la gerarchia comune.
+
+Telegram ha confermato i blocchi `heading` con dimensione 3, `blockquote`, `footer` e i testi aggiornati. Il messaggio 66 risponde al PROBLEM 59; la successiva modifica usa la freccia tipografica `→`. L’utente ha approvato la resa visiva finale e autorizzato push e merge. Superati i 18 test del bridge; il servizio è stato riavviato con il nuovo formato.
+
+Durante la lettura dello storico MariaDB risultava fermo e Zabbix server già in arresto. È stato avviato il solo database per consentire la lettura API e delle pagine evento; successivamente MariaDB risultava nuovamente inattivo e Zabbix server ancora in arresto. Il ripristino di questi servizi resta fuori da questa rifinitura; le prove Telegram descritte sono state confermate.

@@ -15,6 +15,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -126,6 +127,9 @@ class Bridge:
         for field, limit in [('host', 255), ('problem', 2048), ('occurred_at', 80)]:
             if not isinstance(data.get(field), str) or not 0 < len(data[field]) <= limit:
                 raise BridgeError('Contenuto evento incompleto o troppo lungo.')
+        for field, limit in [('severity_name', 255), ('duration', 80)]:
+            if field in data and (not isinstance(data[field], str) or len(data[field]) > limit):
+                raise BridgeError('Nome della severità o durata non validi.')
         if kind == 'recovery':
             if not re.fullmatch(r'[1-9][0-9]{0,19}', str(data.get('recovery_eventid', ''))):
                 raise BridgeError('Identificativo RECOVERY non valido.')
@@ -156,7 +160,8 @@ class Bridge:
                            (receipt_id, kind, str(data['eventid']), data['host'], str(data['chat_id']),
                             thread, 'sending', 'Invio in corso; in caso di interruzione verificare Telegram.', int(time.time()),
                             str(data['hostid']), str(data['bot_id']), json.dumps({
-                                key: data[key] for key in ('kind', 'eventid', 'hostid', 'host', 'problem', 'severity', 'occurred_at')})))
+                                key: data[key] for key in ('kind', 'eventid', 'hostid', 'host', 'problem', 'severity',
+                                                         'severity_name', 'occurred_at') if key in data})))
             rich = self.event_message(data)
             params = {'chat_id': int(data['chat_id']), 'rich_message': rich}
             if thread:
@@ -176,19 +181,53 @@ class Bridge:
             return {'message_id': message['message_id'], 'duplicate': False}
 
     @staticmethod
-    def event_message(data, recovery=None, announcement=False):
-        labels = ['Non classificato', 'Informazione', 'Avviso', 'Media', 'Alta', 'Disastro']
-        title = 'TEST TRASPORTO Zabbix Talk' if data['kind'] == 'transport' else 'PROBLEM · ' + data['host']
+    def message_time(value, same_day_as=''):
+        for date_format in ('%Y.%m.%d %H:%M:%S', '%Y-%m-%d %H:%M:%S'):
+            try:
+                date = datetime.strptime(value, date_format)
+                if same_day_as[:10].replace('.', '-') == date.strftime('%Y-%m-%d'):
+                    return date.strftime('%H:%M')
+                return date.strftime('%d/%m | %H:%M')
+            except ValueError:
+                continue
+        return value
+
+    @staticmethod
+    def event_message(data, recovery=None):
+        if data['kind'] == 'transport':
+            return Bridge.test_message(transport=True)
+        leds = ['⚪', '🔵', '🟡', '🟠', '🔴', '🔴']
+        severity = int(data['severity'])
+        host = data['host']
+        if len(host) > 32:
+            host = host[:10].rstrip('- ') + '-…-' + host[-10:].lstrip('- ')
+        led = '🟢' if recovery else leds[severity]
+        content = '<h3>' + led + ' ' + ('RISOLTO' if recovery else html.escape(host)) + '</h3>'
+        if not recovery and data['kind'] == 'update':
+            content += '<p><b>AGGIORNAMENTO</b></p>'
+        content += '<blockquote><p>' + html.escape(data['problem']) + '</p></blockquote>'
+        started = Bridge.message_time(data['occurred_at'])
         if recovery:
-            title = ('RIPRISTINO' if announcement else 'RISOLTO') + ' · ' + data['host']
-        content = '<h2>' + html.escape(title) + '</h2><p>' + html.escape(data['problem'])
-        content += '</p><p>Host: ' + html.escape(data['host']) + '<br>Severità: ' + labels[int(data['severity'])]
-        content += '<br>Inizio Zabbix: ' + html.escape(data['occurred_at'])
-        if recovery:
-            content += '<br>Ripristino Zabbix: ' + html.escape(recovery['recovered_at'])
-            content += '<br>RECOVERY: ' + str(recovery['recovery_eventid'])
-        content += '<br>Evento: ' + str(data['eventid']) + ' · Host ID: ' + str(data['hostid']) + '</p>'
-        return {'html': content}
+            content += '<footer>' + html.escape(started) + ' → ' + html.escape(
+                Bridge.message_time(recovery['recovered_at'], data['occurred_at']))
+            duration = recovery.get('duration', '')
+            if duration and duration not in ('{EVENT.DURATION}', '*UNKNOWN*'):
+                if re.fullmatch(r'(?:[0-9]+[wdhms]\s*)+', duration):
+                    units = {'w': 'sett', 'd': 'g', 'h': 'h', 'm': 'min', 's': 's'}
+                    duration = ' '.join(str(int(value)) + ' ' + units[unit]
+                                        for value, unit in re.findall(r'([0-9]+)([wdhms])', duration))
+                content += '<br>Durata | ' + html.escape(duration)
+        else:
+            content += '<footer>Inizio | ' + html.escape(started)
+        return {'html': content + '</footer>', 'skip_entity_detection': True}
+
+    @staticmethod
+    def test_message(revision=0, transport=False):
+        purpose = 'Verifica Media Type → bridge → Telegram' if transport else 'Verifica del collegamento Telegram'
+        content = '<h3>TEST TRASPORTO</h3><blockquote><p>' + purpose + '</p></blockquote>'
+        if revision:
+            content += f'<footer>Revisione | {revision}</footer>'
+        return {'html': content, 'skip_entity_detection': True}
 
     def recover(self, data, current):
         receipt_id = 'recovery:' + str(data['eventid'])
@@ -227,7 +266,8 @@ class Bridge:
                 with self.receipts() as db:
                     db.execute('UPDATE receipts SET status=?,detail=?,updated_at=? WHERE id=?',
                                ('sending', 'Originale aggiornato; invio del messaggio di ripristino in corso.', int(time.time()), receipt_id))
-                params = {'chat_id': int(original['chat_id']), 'rich_message': self.event_message(event, data, True)}
+                params = {'chat_id': int(original['chat_id']), 'rich_message': self.event_message(event, data),
+                          'reply_parameters': {'message_id': original['message_id']}}
                 if original['thread_id']:
                     params['message_thread_id'] = int(original['thread_id'])
                 message = self.api(current['token'], 'sendRichMessage', params)
@@ -357,9 +397,7 @@ class Bridge:
             if operation == 'edit' and not test:
                 raise BridgeError('Invia prima una notifica di prova.')
             revision = test.get('revision', 0) + 1 if operation == 'edit' else 0
-            rich = {'html': '<h2>TEST Zabbix Talk</h2><p>'
-                    + (f'Notifica di prova aggiornata. Revisione {revision}.' if revision else 'Notifica di prova: collegamento Telegram riuscito.')
-                    + '</p><p>Questo messaggio non rappresenta un incidente Zabbix.</p>'}
+            rich = self.test_message(revision)
             params = {'chat_id': destination['chat_id'], 'rich_message': rich}
             if operation == 'send':
                 if destination.get('message_thread_id'):
