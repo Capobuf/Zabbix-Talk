@@ -2,7 +2,7 @@
 
 Zabbix Talk integra un modulo di configurazione nel frontend Zabbix e un bridge Telegram locale per notifiche e operazioni sugli incidenti.
 
-Le slice [#1](https://github.com/Capobuf/Zabbix-Talk/issues/1) e [#2](https://github.com/Capobuf/Zabbix-Talk/issues/2) sono integrate. La slice [#3](https://github.com/Capobuf/Zabbix-Talk/issues/3), nella [PR #14](https://github.com/Capobuf/Zabbix-Talk/pull/14), aggiunge il setup delle notifiche PROBLEM tramite Action nativa e Webhook locale. Il branch della slice [#4](https://github.com/Capobuf/Zabbix-Talk/issues/4) include questa dipendenza e aggiunge il RECOVERY sul messaggio originale.
+Le slice #1–#4 e lo stile Telegram #16 sono integrate. La slice [#5](https://github.com/Capobuf/Zabbix-Talk/issues/5), sul branch locale `issue/5-multi-group-routing`, aggiunge le associazioni multi-gruppo e la risoluzione dei conflitti per host. Il comportamento corrente è descritto in fondo; le sezioni delle slice precedenti documentano anche le rispettive prove storiche.
 
 ## Riferimenti di progetto
 
@@ -72,7 +72,7 @@ git pull --ff-only
 sudo ./scripts/install.sh /usr/share/zabbix/ui super
 ```
 
-Il branch della slice corrente è `issue/4-problem-recovery`, ancora locale durante la revisione. Usa `git pull` dopo la pubblicazione del branch e la configurazione dell'upstream, oppure su `main` quando la modifica sarà integrata. Non sovrascrivere modifiche locali. Per modifiche al solo Python basta `sudo systemctl restart zabbix-talk`; per PHP aggiorna la pagina. Quando cambiano unità systemd, socket o permessi, riesegui l’installer. La VM usa il codice del checkout, senza build, container o dipendenze Python esterne.
+Il branch della slice corrente è `issue/5-multi-group-routing`, ancora locale durante la revisione. Usa `git pull` dopo la pubblicazione del branch e la configurazione dell'upstream, oppure su `main` quando la modifica sarà integrata. Non sovrascrivere modifiche locali. Per modifiche al solo Python basta `sudo systemctl restart zabbix-talk`; per PHP aggiorna la pagina. Quando cambiano unità systemd, socket o permessi, riesegui l’installer. La VM usa il codice del checkout, senza build, container o dipendenze Python esterne.
 
 ```bash
 systemctl status zabbix-talk --no-pager
@@ -251,3 +251,34 @@ Per la revisione dal telefono:
 Telegram ha confermato i blocchi `heading` con dimensione 3, `blockquote`, `footer` e i testi aggiornati. Il messaggio 66 risponde al PROBLEM 59; la successiva modifica usa la freccia tipografica `→`. L’utente ha approvato la resa visiva finale e autorizzato push e merge. Superati i 18 test del bridge; il servizio è stato riavviato con il nuovo formato.
 
 Durante la lettura dello storico MariaDB risultava fermo e Zabbix server già in arresto. È stato avviato il solo database per consentire la lettura API e delle pagine evento; successivamente MariaDB risultava nuovamente inattivo e Zabbix server ancora in arresto. Il ripristino di questi servizi resta fuori da questa rifinitura; le prove Telegram descritte sono state confermate.
+
+
+### Destinazioni multiple e conflitti — slice #5
+
+Apri **Zabbix Talk → 4. Destinazioni e notifiche reali → Gestisci associazioni, anteprima host e conflitti** (`zabbix.php?action=zabbix.talk.destinations`). Il punto 2 registra più destinazioni tramite il comando monouso inviato da un amministratore Telegram; ogni chat/topic rimane disponibile. La selezione nella panoramica riguarda prove e creazione topic, senza cambiare le associazioni salvate.
+
+1. Associa ciascun gruppo host alla chat/topic registrata, oppure scegli **Nessuna associazione**. Sono inclusi i sottogruppi, come nelle condizioni native delle Action Zabbix.
+2. Premi **Anteprima**: mostra host e appartenenze attuali. Più gruppi verso la medesima coppia chat/topic equivalgono a una destinazione unica. Per destinazioni diverse compare **Conflitto: invio bloccato**; puoi scegliere esplicitamente una delle candidate per quell'host.
+3. Conferma e premi **Salva e attiva routing**. Il salvataggio ricalcola l'anteprima. Puoi salvare conflitti irrisolti: quegli host restano bloccati, gli altri possono notificare. Una scelta non più candidata non viene utilizzata.
+
+Il setup riusa una sola Action con condizioni OR sui gruppi e OR sulle severità, combinate in AND, un solo destinatario tecnico e un solo passo. Le severità rimangono filtrate esclusivamente da Zabbix. Rimuovere tutte le associazioni disabilita l'Action conservando condizioni di gruppo: non crea un'Action attiva senza filtro. Come per ogni disabilitazione nativa, non promette l'elaborazione dei RECOVERY pendenti: completa il collaudo prima di disattivare il canale.
+
+Prima di ogni nuovo PROBLEM, il bridge legge evento, gruppi associati e appartenenze dell'host tramite API Zabbix. Il ruolo tecnico ammette soltanto `event.get`, `hostgroup.get`, `host.get`, con lettura sui gruppi autorizzati e frontend disabilitato. Il token generato per l'utente tecnico viene rinnovato al salvataggio e conservato soltanto nel file privato del bridge; nel modulo resta l'ID del token. Nessun token Super Admin. Per consentire i RECOVERY nativi dopo una modifica delle associazioni sono conservati i precedenti diritti di lettura; gli altri gruppi non vengono concessi automaticamente. Se un host viene spostato fuori da tutti i gruppi leggibili, i permessi nativi possono impedire anche il RECOVERY.
+
+Un cambio di appartenenza viene verificato al successivo PROBLEM, senza dipendere dall'ultima anteprima. Zero candidate produce silenzio; conflitto o API non disponibile bloccano l'invio e restituiscono un errore all'Action log. L'anteprima si ricalcola riaprendo la pagina. Eventi con più host sono rifiutati: questa slice non sceglie arbitrariamente il primo host del trigger. I nomi dei gruppi associati vengono riletti, evitando routing basato su vecchi prefissi dopo una rinomina. La revisione del routing nel Media Type e nel bridge deve coincidere: una sincronizzazione incompleta blocca i nuovi PROBLEM; correggi il bridge e salva nuovamente. I messaggi già confermati restano deduplicati e i RECOVERY usano chat/topic/message_id originali.
+
+Per creare un topic, seleziona nella panoramica una destinazione appartenente a un forum, indica il nome e premi **Crea topic nel gruppo selezionato**. Richiede bot amministratore con `can_manage_topics`; un errore resta visibile, senza successo simulato o retry automatico. Per un topic esistente usa il comando dal topic: non viene tentata alcuna enumerazione dei topic.
+
+Le risorse modificate esternamente continuano a bloccare il salvataggio. Anche l'ereditarietà dei permessi applicata da Zabbix alla creazione di sottogruppi può cambiare il gruppo utenti gestito e richiedere il ripristino esplicito della configurazione osservata. Per nuovi sottogruppi controlla i diritti reali e salva nuovamente; non sono ampliati dal bridge durante un invio.
+
+#### Prove sulla VM del 27 ottobre 2026
+
+- Pagina reale aperta e salvata via HTTPS e CSRF nativo. Riutilizzati Media Type 110, Action 15, utente 5, gruppo utenti 16, ruolo 6, macro 4. Il token di lettura ha interrogato realmente le appartenenze dell'host isolato 10816.
+- PROBLEM nativo 9382 → messaggio 67; RECOVERY 9383 → modifica del 67 e risposta 68. La risposta cita il messaggio originale già aggiornato a RISOLTO: la specifica prescrive aggiornamento più nuovo messaggio per severità 4/5, mentre la citazione è una scelta di presentazione della #16.
+- Host isolato appartenente ai gruppi 25 e 27 (sottogruppo), entrambi verso `test-bot`: PROBLEM 9386 → un solo alert Zabbix Talk 157, confermato senza errori, e un solo messaggio 69. RECOVERY 9387 → modifica del 69 e risposta 70. Al termine ripristinata l'appartenenza originale per riusare i pulsanti del collaudo.
+- Rimozione completa delle associazioni → confermata Action disabilitata dal salvataggio; poi ripristinate le due associazioni di prova. Aggiornamento parziale della panoramica riuscito. Verificata la pagina su desktop e a 1024 px con i componenti nativi.
+- Superati 22 test del bridge: includono destinazioni differenti, conflitto dopo cambio di appartenenza, scelta esplicita/stale, sottogruppi, silenzio senza associazioni, revisione obsoleta, errore API, evento multi-host, persistenza e permessi di creazione topic. Sintassi PHP verificata sui file modificati.
+
+La prova live usa un solo gruppo Telegram senza topic. Due chat/topic differenti, conflitti fra destinazioni e creazione di topic sono verificati con risposte API controllate, non con un secondo cliente reale. L'host isolato rimane risolto e disponibile per la revisione; i due gruppi di collaudo restano associati. Nessun push o PR prima dell'approvazione dell'anteprima.
+
+Riferimenti: [condizioni e sottogruppi nelle Action](https://www.zabbix.com/documentation/7.4/en/manual/config/notifications/action/conditions), [host.get](https://www.zabbix.com/documentation/7.4/en/manual/api/reference/host/get), [token.generate](https://www.zabbix.com/documentation/7.4/en/manual/api/reference/token/generate), [createForumTopic](https://core.telegram.org/bots/api#createforumtopic).

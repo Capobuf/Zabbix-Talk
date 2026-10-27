@@ -88,7 +88,7 @@ $destination_fields = new CFormGrid([
         new CTag('li', true, _('Torna qui e premi Ho inviato il comando: aggiorna collegamento. Compariranno gruppo e topic; poi passa alla prova del punto 3.'))
     ])),
     new CLabel(_('Destinazione corrente')),
-    new CFormField(_('Un nuovo collegamento sostituisce la destinazione corrente e azzera il test se scegli un gruppo/topic diverso. Il comando scade dopo 10 minuti ed è monouso.'))
+    new CFormField(_('Ogni collegamento registra una destinazione e la seleziona per le prove. Le altre destinazioni restano disponibili per le associazioni. Il comando scade dopo 10 minuti ed è monouso.'))
 ]);
 $page->addItem($form('talk-destination')->addItem(
     (new CTabView(['id' => 'talk-destination-tabs']))
@@ -97,6 +97,23 @@ $page->addItem($form('talk-destination')->addItem(
         ])
         ->setFooter(makeFormFooter($button(_('Genera comando di collegamento'), 'register', (bool) $bot)))
 ));
+
+$select = (new CSelect('destination_key'))->setFocusableElementId('talk-destination-select');
+foreach ($status['destinations'] ?? [] as $key => $d) {
+    $select->addOption(new CSelectOption($key, $d['title'].' · '.$d['chat_id'].' · topic '.($d['message_thread_id'] ?? 'Generale')));
+}
+$select->setValue($destination ? $destination['chat_id'].':'.($destination['message_thread_id'] ?? '') : '');
+$page->addItem($form('talk-select')->addItem(new CFormGrid([
+    new CLabel(_('Destinazione per prove e nuovo topic'), 'talk-destination-select'), new CFormField($select),
+    new CLabel(_('Selezione')), new CFormField($button(_('Seleziona destinazione'), 'select', (bool) $destination))
+])));
+$page->addItem($form('talk-topic')->addItem(new CFormGrid([
+    new CLabel(_('Nome nuovo topic'), 'topic_name'), new CFormField((new CTextBox('topic_name'))->setAttribute('maxlength', 128)),
+    new CLabel(_('Creazione su richiesta')), new CFormField([
+        $button(_('Crea topic nel gruppo selezionato'), 'create_topic', (bool) $destination),
+        new CTag('p', true, _('Richiede un forum e il bot amministratore con can_manage_topics. Per topic esistenti usa il comando di collegamento.'))
+    ])
+])));
 
 $test_fields = new CFormGrid([
     new CLabel(_('Come provare il collegamento')),
@@ -120,42 +137,10 @@ $notification_form = static function (string $id): CForm {
         ->setId($id)
         ->addItem((new CVar(CSRF_TOKEN_NAME, CCsrfTokenHelper::get('zabbix.talk.configure')))->removeId());
 };
-$groups = [new CSelectOption('', _('Seleziona un gruppo host'))];
-foreach ($data['hostgroups'] as $group) {
-    $groups[] = new CSelectOption($group['groupid'], $group['name']);
-}
-$severity_options = [];
-foreach (['Non classificato', 'Informazione', 'Avviso', 'Media', 'Alta', 'Disastro'] as $value => $label) {
-    $severity_options[] = ['value' => $value, 'label' => $label];
-}
-$notification_fields = new CFormGrid([
-    new CLabel(_('Stato risorse Zabbix')), new CFormField($text('notification_setup')),
-    new CLabel(_('Gruppo host Zabbix'), 'talk-groupid-focus'),
-    new CFormField((new CSelect('groupid'))->setId('talk-groupid')->setFocusableElementId('talk-groupid-focus')
-        ->addOptions($groups)->setValue($config['groupid'] ?? '')->setWidth(ZBX_TEXTAREA_MEDIUM_WIDTH)),
-    new CLabel(_('Destinazione Telegram')),
-    new CFormField([
-        $destination ? $destination['title'].' · chat_id '.$destination['chat_id']
-            .($destination['message_thread_id'] ? ' · topic '.$destination['message_thread_id'] : _(' · senza topic specifico'))
-            : _('Collega prima il gruppo o topic al punto 2.'),
-        new CTag('p', true, _('Il salvataggio associa il gruppo host alla destinazione corrente. Dopo un nuovo collegamento Telegram salva nuovamente questa configurazione.'))
-    ]),
-    new CLabel(_('Severità abilitate (24/7)')),
-    new CFormField((new CCheckBoxList('severities'))->setOptions($severity_options)
-        ->setChecked($config['severities'] ?? [2, 3, 4, 5])->setColumns(3)),
-    new CLabel(_('Risorse gestite')),
-    new CFormField(_('Media Type Webhook «Zabbix Talk - Webhook», utente «zabbix-talk-notify», gruppo e ruolo dedicati, macro segreta del canale locale, Action «Zabbix Talk - PROBLEM». L’utente tecnico legge soltanto il gruppo scelto e non può accedere al frontend. Le severità sono filtrate dall’Action nativa.')),
-    new CLabel(_('Messaggi di ripristino')),
-    new CFormField(_('Il RECOVERY aggiorna il messaggio originale a RISOLTO. Alta/High (4) e Disastro/Disaster (5): anche un nuovo messaggio di ripristino. Severità 0–3: solo modifica silenziosa. Gli eventi già inviati conservano chat e topic originali.')),
-    new CLabel(_('Conferma amministratore'), 'confirm'),
-    new CFormField((new CCheckBox('confirm', '1'))->setLabel(_('Confermo la creazione/aggiornamento delle risorse e l’attivazione dell’Action per il gruppo e le severità scelti.')))
-]);
-$page->addItem($notification_form('talk-notifications')->addItem(
-    (new CTabView(['id' => 'talk-notifications-tabs']))
-        ->addTab('talk-notifications-tab', _('Notifiche PROBLEM/RECOVERY'), [
-            new CTag('h2', true, _('4. Attiva le notifiche reali')), $notification_fields
-        ])->setFooter(makeFormFooter($button(_('Salva e attiva notifiche'), 'provision', (bool) $destination)))
-));
+$page->addItem(new CTag('h2', true, _('4. Destinazioni e notifiche reali')));
+$page->addItem($text('notification_setup'));
+$page->addItem(new CTag('p', true, new CLink(_('Gestisci associazioni, anteprima host e conflitti'),
+    'zabbix.php?action=zabbix.talk.destinations')));
 $ids = [];
 foreach ($config['ids'] ?? [] as $resource => $id) {
     $ids[] = (['macro' => _('Macro segreta'), 'role' => _('Ruolo'), 'group' => _('Gruppo utenti'), 'user' => _('Utente'),

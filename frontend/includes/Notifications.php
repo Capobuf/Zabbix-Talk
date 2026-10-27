@@ -13,6 +13,8 @@ require_once __DIR__.'/BridgeClient.php';
 
 class Notifications {
     private array $module;
+    private string $routing_revision = '';
+    private string $routing_token = '';
 
     public function __construct() {
         $modules = self::ok(API::Module()->get(['output' => ['moduleid', 'config'], 'filter' => ['id' => 'zabbix-talk']]));
@@ -100,9 +102,13 @@ class Notifications {
         $same_telegram = (string) ($telegram['bot']['id'] ?? '') === (string) $config['bot_id']
             && (string) ($destination['chat_id'] ?? '') === (string) $config['destination']['chat_id']
             && (string) ($destination['message_thread_id'] ?? '') === (string) ($config['destination']['message_thread_id'] ?? '');
+        if (isset($config['routes'])) {
+            $same_telegram = (string) ($telegram['bot']['id'] ?? '') === (string) $config['bot_id']
+                && ($telegram['routing_revision'] ?? '') === $config['routing_revision'];
+        }
         $enabled = !$missing && $resources['action']['status'] == ACTION_STATUS_ENABLED;
         if (!$same_telegram) {
-            $message = _('Bot o destinazione Telegram diversi dal setup attivo. Salva nuovamente per ricevere le notifiche nella destinazione corrente.');
+            $message = _('Bot o routing non sincronizzati. Apri Destinazioni e salva nuovamente prima di ricevere nuovi PROBLEM.');
         }
         elseif ($changed) {
             $message = _('Modifiche esterne rilevate; salvataggio bloccato: ').implode(', ', $changed);
@@ -162,7 +168,8 @@ class Notifications {
             'recovered_at' => '{EVENT.RECOVERY.DATE} {EVENT.RECOVERY.TIME}',
             'occurred_at' => '{EVENT.DATE} {EVENT.TIME}', 'bot_id' => (string) $bot['id'],
             'chat_id' => (string) $destination['chat_id'],
-            'message_thread_id' => $destination['message_thread_id'] ? (string) $destination['message_thread_id'] : ''];
+            'message_thread_id' => $destination['message_thread_id'] ? (string) $destination['message_thread_id'] : '',
+            'routing_revision' => $this->routing_revision ?? ''];
         $parameters = [];
         foreach ($values as $name => $value) {
             $parameters[] = ['name' => $name, 'value' => $value];
@@ -170,7 +177,7 @@ class Notifications {
         return $parameters;
     }
 
-    public function provision(string $groupid, array $severities, bool $confirmed): string {
+    public function provision(string $groupid, array $severities, bool $confirmed, ?array $routes = null, array $choices = []): string {
         if (!$confirmed) {
             throw new RuntimeException(_('Conferma la creazione/aggiornamento delle risorse e l’attivazione dell’Action.'));
         }
@@ -183,8 +190,9 @@ class Notifications {
         if (!$severities || array_diff($severities, range(0, 5))) {
             throw new RuntimeException(_('Seleziona almeno una severità valida.'));
         }
-        $groups = self::ok(API::HostGroup()->get(['output' => ['groupid', 'name'], 'groupids' => [$groupid]]));
-        if (count($groups) !== 1) {
+        $groupids = $routes === null ? [$groupid] : array_column($routes, 'groupid');
+        $groups = $groupids ? self::ok(API::HostGroup()->get(['output' => ['groupid', 'name'], 'groupids' => $groupids])) : [];
+        if (count($groups) !== count($groupids)) {
             throw new RuntimeException(_('Scegli un gruppo host accessibile. Nessuna Action è stata attivata.'));
         }
         $state = BridgeClient::request('/status');
@@ -193,7 +201,19 @@ class Notifications {
         }
         BridgeClient::request('/action', ['operation' => 'verify']);
         $channel = BridgeClient::request('/channel', ['operation' => 'channel']);
-        return $this->transaction(function () use ($groupid, $severities, $groups, $state, $channel) {
+        $routes = $routes ?? [['groupid' => $groupid, 'group_name' => $groups[0]['name'], 'destination' => $state['destination']]];
+        $this->preview($routes, $choices);
+        $rights = [];
+        foreach (self::ok(API::HostGroup()->get(['output' => ['groupid', 'name']])) as $group) {
+            foreach ($routes as $route) {
+                if ($group['groupid'] == $route['groupid'] || str_starts_with($group['name'], $route['group_name'].'/')) {
+                    $rights[$group['groupid']] = ['id' => $group['groupid'], 'permission' => PERM_READ];
+                }
+            }
+        }
+        $rights = array_values($rights);
+        $this->routing_revision = bin2hex(random_bytes(16));
+        $message = $this->transaction(function () use ($rights, $groupid, $groupids, $routes, $choices, $severities, $groups, $state, $channel) {
             $config = $this->config();
             $existing = $this->resources();
             if ($this->changes($existing)) {
@@ -209,12 +229,16 @@ class Notifications {
             $this->put('role', API::Role(), 'roleid', [
                 'name' => 'Zabbix Talk - Notify', 'type' => USER_TYPE_ZABBIX_USER,
                 'rules' => ['ui.default_access' => 0, 'ui' => [['name' => 'monitoring.problems', 'status' => 1]],
-                    'api.access' => 0, 'actions.default_access' => 0, 'modules.default_access' => 0]
+                    'api.access' => 1, 'api.mode' => ZBX_ROLE_RULE_API_MODE_ALLOW, 'api' => ['host.get', 'hostgroup.get', 'event.get'], 'actions.default_access' => 0, 'modules.default_access' => 0]
             ], $existing, $config);
+            // Keep previously granted read scope so native RECOVERY can reach the original recipient after rerouting.
+            foreach ($existing['group']['hostgroup_rights'] ?? [] as $right) {
+                if (!in_array($right['id'], array_column($rights, 'id'))) { $rights[] = $right; }
+            }
             $this->put('group', API::UserGroup(), 'usrgrpid', [
                 'name' => 'Zabbix Talk - Notify', 'gui_access' => GROUP_GUI_ACCESS_DISABLED,
                 'users_status' => GROUP_STATUS_ENABLED,
-                'hostgroup_rights' => [['id' => $groupid, 'permission' => PERM_READ]],
+                'hostgroup_rights' => $rights,
                 'templategroup_rights' => [], 'tag_filters' => []
             ], $existing, $config);
             $this->put('media', API::MediaType(), 'mediatypeid', [
@@ -233,15 +257,23 @@ class Notifications {
                 $user['passwd'] = bin2hex(random_bytes(32)).'aA1!';
             }
             $this->put('user', API::User(), 'userid', $user, $existing, $config);
-            $conditions = [['conditiontype' => ZBX_CONDITION_TYPE_HOST_GROUP,
-                'operator' => CONDITION_OPERATOR_EQUAL, 'value' => $groupid]];
+            $conditions = array_map(static fn($id) => ['conditiontype' => ZBX_CONDITION_TYPE_HOST_GROUP,
+                'operator' => CONDITION_OPERATOR_EQUAL, 'value' => $id], $groupids);
+            if (!$conditions) {
+                // An empty mapping must never turn into an unfiltered Action.
+                $conditions = array_values(array_filter($existing['action']['filter']['conditions'] ?? [],
+                    static fn($c) => $c['conditiontype'] == ZBX_CONDITION_TYPE_HOST_GROUP));
+                $conditions = array_map(static fn($c) => array_intersect_key($c,
+                    array_flip(['conditiontype', 'operator', 'value'])), $conditions);
+                if (!$conditions) { throw new RuntimeException(_('Aggiungi almeno un’associazione prima del primo setup.')); }
+            }
             foreach ($severities as $severity) {
                 $conditions[] = ['conditiontype' => ZBX_CONDITION_TYPE_TRIGGER_SEVERITY,
                     'operator' => CONDITION_OPERATOR_EQUAL, 'value' => (string) $severity];
             }
             $this->put('action', API::Action(), 'actionid', [
                 'name' => 'Zabbix Talk - PROBLEM', 'eventsource' => EVENT_SOURCE_TRIGGERS,
-                'status' => ACTION_STATUS_ENABLED, 'esc_period' => '1m',
+                'status' => $routes ? ACTION_STATUS_ENABLED : ACTION_STATUS_DISABLED, 'esc_period' => '1m',
                 'filter' => ['evaltype' => CONDITION_EVAL_TYPE_AND_OR, 'conditions' => $conditions],
                 'operations' => [['operationtype' => OPERATION_TYPE_MESSAGE, 'esc_step_from' => 1, 'esc_step_to' => 1,
                     'opmessage' => ['default_msg' => 0, 'subject' => 'Zabbix Talk', 'message' => 'problem',
@@ -252,7 +284,17 @@ class Notifications {
                 'update_operations' => []
             ], $existing, $config);
             $config['groupid'] = $groupid;
-            $config['group_name'] = $groups[0]['name'];
+            $config['group_name'] = $groups[0]['name'] ?? '';
+            $config['routes'] = $routes;
+            $config['choices'] = $choices;
+            $config['routing_revision'] = $this->routing_revision;
+            $tokens = self::ok(API::Token()->get(['output' => ['tokenid'],
+                'userids' => [$config['ids']['user']], 'filter' => ['name' => 'Zabbix Talk - Routing']]));
+            $tokenid = $tokens[0]['tokenid'] ?? self::ok(API::Token()->create([
+                'name' => 'Zabbix Talk - Routing', 'userid' => $config['ids']['user']]))['tokenids'][0];
+            $token = self::ok(API::Token()->generate([$tokenid]))[0]['token'];
+            $config['routing_tokenid'] = $tokenid;
+            $this->routing_token = $token;
             $config['severities'] = $severities;
             $config['destination'] = $state['destination'];
             $config['bot_id'] = $state['bot']['id'];
@@ -261,8 +303,51 @@ class Notifications {
             $this->save($config);
             $config['observed'] = $this->resources();
             $this->save($config);
-            return _('Notifiche attivate per il gruppo selezionato. Risorse Zabbix salvate senza duplicati.');
+            return $routes ? _('Routing e notifiche salvati. I conflitti restano bloccati fino alla scelta esplicita per host.')
+                : _('Associazioni rimosse e Action disabilitata.');
         });
+        $path = rtrim(dirname($_SERVER['SCRIPT_NAME']), '/').'/api_jsonrpc.php';
+        BridgeClient::request('/routing', ['routes' => $routes, 'choices' => (object) $choices,
+            'api_url' => 'http://127.0.0.1'.$path, 'api_token' => $this->routing_token,
+            'revision' => $this->routing_revision]);
+        return $message;
+    }
+
+    public function routes(): array {
+        $config = $this->config();
+        return $config['routes'] ?? (empty($config['groupid']) ? [] : [[
+            'groupid' => $config['groupid'], 'group_name' => $config['group_name'], 'destination' => $config['destination']]]);
+    }
+
+    public function preview(array $routes, array $choices): array {
+        $all = self::ok(API::HostGroup()->get(['output' => ['groupid', 'name']]));
+        $ids = [];
+        foreach ($all as $group) {
+            foreach ($routes as $route) {
+                if ($group['groupid'] == $route['groupid'] || str_starts_with($group['name'], $route['group_name'].'/')) {
+                    $ids[] = $group['groupid'];
+                }
+            }
+        }
+        if (!$ids) { return []; }
+        $hosts = self::ok(API::Host()->get(['output' => ['hostid', 'name'], 'groupids' => array_values(array_unique($ids)),
+            'selectHostGroups' => ['groupid', 'name'], 'sortfield' => 'name']));
+        foreach ($hosts as &$host) {
+            $host['candidates'] = [];
+            foreach ($routes as $route) {
+                foreach ($host['hostgroups'] as $group) {
+                    if ($group['groupid'] == $route['groupid'] || str_starts_with($group['name'], $route['group_name'].'/')) {
+                        $destination = $route['destination'];
+                        $key = $destination['chat_id'].':'.($destination['message_thread_id'] ?? '');
+                        $host['candidates'][$key] = $destination;
+                    }
+                }
+            }
+            $host['selected'] = count($host['candidates']) === 1 ? array_key_first($host['candidates'])
+                : (isset($host['candidates'][$choices[$host['hostid']] ?? '']) ? $choices[$host['hostid']] : '');
+        }
+        unset($host);
+        return $hosts;
     }
 
     public function transportTest(): string {
@@ -271,6 +356,9 @@ class Notifications {
         }
         $media = $this->resources()['media'];
         $parameters = array_column($media['parameters'], 'value', 'name');
+        $destination = BridgeClient::request('/status')['destination'];
+        $parameters['chat_id'] = (string) $destination['chat_id'];
+        $parameters['message_thread_id'] = (string) ($destination['message_thread_id'] ?? '');
         $parameters['channel_key'] = BridgeClient::request('/channel', ['operation' => 'channel'])['key'];
         $parameters = array_replace($parameters, ['kind' => 'transport', 'eventid' => (string) random_int(1, PHP_INT_MAX),
             'event_value' => '1', 'hostid' => '1', 'host' => 'Test trasporto', 'problem' => 'Prova Media Type → bridge → Telegram. Nessun evento Zabbix generato.',

@@ -15,8 +15,8 @@ require_once __DIR__.'/../includes/BridgeClient.php';
 class Update extends CController {
     protected function checkInput(): bool {
         $valid = $this->validateInput([
-            'operation' => 'required|in connect,verify,register,send,edit',
-            'token' => 'string'
+            'operation' => 'required|in connect,verify,register,send,edit,select,create_topic',
+            'token' => 'string', 'destination_key' => 'string', 'topic_name' => 'string'
         ]);
         $token = $this->getInput('token', '');
         if (!$valid || strlen($token) > 256) {
@@ -30,7 +30,7 @@ class Update extends CController {
     }
 
     protected function checkPermissions(): bool {
-        return CWebUser::getType() == USER_TYPE_SUPER_ADMIN;
+        return ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && CWebUser::getType() == USER_TYPE_SUPER_ADMIN;
     }
 
     protected function doAction(): void {
@@ -40,7 +40,9 @@ class Update extends CController {
             }
             $result = BridgeClient::request('/action', [
                 'operation' => $this->getInput('operation'),
-                'token' => $this->getInput('token', '')
+                'token' => $this->getInput('token', ''),
+                'destination_key' => $this->getInput('destination_key', ''),
+                'topic_name' => $this->getInput('topic_name', '')
             ]);
             CMessageHelper::setSuccessTitle($result['message']);
         }
