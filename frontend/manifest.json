@@ -19,6 +19,10 @@
     },
     "zabbix.talk.configure": {
       "class": "Configure"
+    },
+    "zabbix.talk.destinations": {
+      "class": "Destinations",
+      "view": "zabbix.talk.destinations"
     }
   }
 }

@@ -332,6 +332,87 @@ class TelegramFlowTest(unittest.TestCase):
                 self.bridge.notify(self.recovery(**changes))
         self.assertFalse(any(method == 'editMessageText' for method, _ in self.calls))
 
+    def routing(self):
+        self.register(17)
+        first = self.bridge.state['destination']
+        self.bridge.action('register')
+        self.register(18)
+        second = self.bridge.state['destination']
+        second = dict(second, chat_id=-1002)
+        self.bridge.state['destinations'][Bridge.destination_key(second)] = second
+        routes = [{'groupid': '1', 'group_name': 'Client A', 'destination': first},
+                  {'groupid': '2', 'group_name': 'Client B', 'destination': second}]
+        self.bridge.configure_routing({'routes': routes, 'choices': {}, 'revision': 'v1',
+                                      'api_url': 'http://127.0.0.1/zabbix/api_jsonrpc.php', 'api_token': 'a' * 64})
+        return routes
+
+    def test_routing_reads_membership_each_time_and_blocks_conflicts(self):
+        routes = self.routing()
+        one = [{'groupid': '1', 'name': 'Client A'}]
+        two = one + [{'groupid': '2', 'name': 'Client B'}]
+        with patch.object(self.bridge, 'host_groups', side_effect=[one, two, [], [two[1]]]) as groups:
+            self.bridge.notify(self.notification(routing_revision='v1'))
+            self.assertEqual(self.calls[-1][1]['chat_id'], -1001)
+            before = len(self.calls)
+            with self.assertRaisesRegex(BridgeError, 'Conflitto'):
+                self.bridge.notify(self.notification(eventid='101', routing_revision='v1'))
+            self.assertEqual(len(self.calls), before)
+            self.assertTrue(self.bridge.notify(self.notification(eventid='102', routing_revision='v1'))['skipped'])
+            self.bridge.notify(self.notification(eventid='103', routing_revision='v1'))
+            self.assertEqual(self.calls[-1][1]['chat_id'], -1002)
+            self.assertEqual(self.calls[-1][1]['message_thread_id'], 18)
+            self.assertEqual(groups.call_count, 4)
+        self.bridge.notify(self.recovery())
+        self.assertEqual(self.calls[-1][1]['chat_id'], -1001)
+        self.assertEqual(self.calls[-1][1]['message_thread_id'], 17)
+        self.assertEqual(len(self.bridge.status()['destinations']), 3)
+        self.assertNotIn('api_token', json.dumps(self.bridge.status()))
+
+    def test_routing_same_destination_override_subgroup_and_stale_choice(self):
+        routes = self.routing()
+        groups = [{'groupid': '11', 'name': 'Client A/Servers'}, {'groupid': '2', 'name': 'Client B'}]
+        with self.assertRaisesRegex(BridgeError, 'Conflitto'):
+            Bridge.resolve(groups, routes, {'17': '-999:'}, '17')
+        selected = Bridge.destination_key(routes[1]['destination'])
+        self.assertEqual(Bridge.resolve(groups, routes, {'17': selected}, '17'), routes[1]['destination'])
+        routes[1]['destination'] = routes[0]['destination']
+        self.assertEqual(Bridge.resolve(groups, routes, {}, '17'), routes[0]['destination'])
+        self.assertIsNone(Bridge.resolve([{'groupid': '3', 'name': 'Client AB'}], routes, {}, '17'))
+        with self.assertRaisesRegex(BridgeError, 'non sincronizzato'):
+            self.bridge.notify(self.notification(routing_revision='old'))
+        self.bridge = Bridge(self.path)
+        self.assertEqual(self.bridge.state['routing']['revision'], 'v1')
+
+    def test_routing_fails_closed_on_zabbix_error_and_multi_host_event(self):
+        self.routing()
+        with patch.object(self.bridge, 'zabbix_api', return_value=[{'hosts': [{'hostid': '17'}, {'hostid': '18'}]}]):
+            with self.assertRaisesRegex(BridgeError, 'più host'):
+                self.bridge.notify(self.notification(routing_revision='v1'))
+        with patch.object(self.bridge, 'host_groups', side_effect=BridgeError('API non raggiungibile')):
+            with self.assertRaisesRegex(BridgeError, 'API non raggiungibile'):
+                self.bridge.notify(self.notification(routing_revision='v1'))
+        self.assertFalse(any(method == 'sendRichMessage' for method, _ in self.calls))
+
+    def test_topic_creation_permission_and_persistence(self):
+        self.register()
+        original = self.bridge.api
+        def api(token, method, params=None):
+            if method == 'getChat':
+                return {'type': 'supergroup', 'is_forum': True}
+            if method == 'getChatMember':
+                return {'status': 'administrator', 'can_manage_topics': True}
+            if method == 'createForumTopic':
+                self.assertEqual(params['name'], 'Client A')
+                return {'message_thread_id': 73}
+            return original(token, method, params)
+        with patch.object(self.bridge, 'api', side_effect=api):
+            self.bridge.action('create_topic', topic_name='Client A')
+        self.bridge = Bridge(self.path)
+        self.assertEqual(self.bridge.state['destination']['message_thread_id'], 73)
+        self.assertEqual(len(self.bridge.status()['destinations']), 2)
+        with self.assertRaisesRegex(BridgeError, 'can_manage_topics'):
+            self.bridge.action('create_topic', topic_name='No permission')
+
     def test_receipts_schema_upgrade_preserves_legacy_rows(self):
         legacy = Path(self.temporary.name) / 'legacy'
         legacy.mkdir()

@@ -109,6 +109,78 @@ class Bridge:
         return bool(re.fullmatch(r'[a-f0-9]{64}', key)) and secrets.compare_digest(
             header.encode(), ('Bearer ' + key).encode())
 
+    @staticmethod
+    def destination_key(destination):
+        return str(destination['chat_id']) + ':' + str(destination.get('message_thread_id') or '')
+
+    def destinations(self):
+        result = dict(self.state.get('destinations', {}))
+        if self.state.get('destination'):
+            destination = self.state['destination']
+            result[self.destination_key(destination)] = destination
+        return result
+
+    @staticmethod
+    def resolve(groups, routes, choices, hostid):
+        candidates = {}
+        for route in routes:
+            if any(str(group['groupid']) == str(route['groupid']) or
+                   group['name'].startswith(route['group_name'] + '/') for group in groups):
+                destination = route['destination']
+                candidates[Bridge.destination_key(destination)] = destination
+        if len(candidates) > 1:
+            selected = choices.get(str(hostid))
+            if selected not in candidates:
+                raise BridgeError('Conflitto di routing per host ' + str(hostid) + ': scegli una destinazione nella pagina Destinazioni.')
+            return candidates[selected]
+        return next(iter(candidates.values()), None)
+
+    def zabbix_api(self, routing, method, params):
+        request = urllib.request.Request(routing['api_url'],
+            data=json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params}).encode(),
+            headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + routing['api_token']})
+        try:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(request, timeout=3) as response:
+                result = json.load(response)
+            if not isinstance(result.get('result'), list):
+                raise ValueError
+            return result['result']
+        except (OSError, ValueError, KeyError, TypeError):
+            raise BridgeError('Impossibile verificare le appartenenze attuali in Zabbix: nessun invio.') from None
+
+    def host_groups(self, routing, hostid, eventid):
+        events = self.zabbix_api(routing, 'event.get', {'eventids': [eventid], 'output': ['eventid'],
+                                                     'selectHosts': ['hostid']})
+        if len(events) != 1 or [str(host['hostid']) for host in events[0].get('hosts', [])] != [hostid]:
+            raise BridgeError('Evento non accessibile o con più host: routing non rappresentabile, nessun invio.')
+        parents = self.zabbix_api(routing, 'hostgroup.get', {'groupids': [r['groupid'] for r in routing['routes']],
+                                                           'output': ['groupid', 'name']})
+        names = {str(group['groupid']): group['name'] for group in parents}
+        for route in routing['routes']:
+            if str(route['groupid']) not in names:
+                raise BridgeError('Gruppo associato non più accessibile: salva nuovamente il routing.')
+            route['group_name'] = names[str(route['groupid'])]
+        hosts = self.zabbix_api(routing, 'host.get', {'hostids': [hostid], 'output': ['hostid'],
+                                                     'selectHostGroups': ['groupid', 'name']})
+        if len(hosts) != 1:
+            raise BridgeError('Host non accessibile: nessun invio.')
+        return hosts[0]['hostgroups']
+
+    def configure_routing(self, data):
+        if (not isinstance(data.get('routes'), list) or not isinstance(data.get('choices'), dict)
+                or not re.fullmatch(r'[a-f0-9]{64}', data.get('api_token', ''))
+                or not re.fullmatch(r'http://127\.0\.0\.1(?::[0-9]+)?/[A-Za-z0-9/_-]*api_jsonrpc\.php', data.get('api_url', ''))):
+            raise BridgeError('Configurazione routing non valida.')
+        with self.operations, self.lock:
+            known = self.destinations()
+            for route in data['routes']:
+                if self.destination_key(route['destination']) not in known:
+                    raise BridgeError('Destinazione non registrata.')
+            self.state['routing'] = {key: data[key] for key in ('routes', 'choices', 'api_token', 'api_url', 'revision')}
+            self.save()
+        return {'message': 'Routing sincronizzato.'}
+
     def notify(self, data):
         kind = data.get('kind')
         if kind not in ('problem', 'recovery', 'transport') or str(data.get('event_value')) != ('0' if kind == 'recovery' else '1'):
@@ -149,7 +221,21 @@ class Bridge:
                     raise BridgeError('Evento già tentato senza conferma: controlla Telegram e la diagnostica; nessun reinvio automatico.')
             if str(current.get('bot', {}).get('id')) != str(data['bot_id']):
                 raise BridgeError('Il bot è cambiato: salva nuovamente la configurazione notifiche.')
-            destination = current.get('destination', {})
+            if kind == 'problem' and data.get('routing_revision') and not current.get('routing'):
+                raise BridgeError('Routing non configurato: nessun invio.')
+            if kind == 'problem' and current.get('routing'):
+                routing = current['routing']
+                if data.get('routing_revision') != routing['revision']:
+                    raise BridgeError('Routing non sincronizzato: salva nuovamente le destinazioni.')
+                destination = self.resolve(self.host_groups(routing, str(data['hostid']), str(data['eventid'])),
+                                           routing['routes'], routing['choices'], str(data['hostid']))
+                if destination is None:
+                    return {'skipped': True, 'reason': 'Host senza associazioni.'}
+                data = dict(data, chat_id=str(destination['chat_id']),
+                            message_thread_id=str(destination.get('message_thread_id') or ''))
+                thread = data['message_thread_id']
+            else:
+                destination = current.get('destination', {})
             if (str(destination.get('chat_id', '')) != str(data['chat_id'])
                     or str(destination.get('message_thread_id') or '') != thread):
                 raise BridgeError('La destinazione è cambiata: salva nuovamente la configurazione notifiche.')
@@ -325,6 +411,8 @@ class Bridge:
                 'registration_error': self.registration_error,
                 'registration': registration,
                 'destination': self.state.get('destination'),
+                'destinations': self.destinations(),
+                'routing_revision': self.state.get('routing', {}).get('revision'),
                 'test': self.state.get('test'),
                 'retry_after': max(0, int(self.cooldown - time.time()) + 1)
             })
@@ -345,7 +433,7 @@ class Bridge:
             raise BridgeError('Permesso mancante: il bot deve essere membro del gruppo e poter inviare messaggi (can_send_messages).')
         return chat
 
-    def action(self, operation, token=''):
+    def action(self, operation, token='', destination_key='', topic_name=''):
         with self.operations:
             with self.lock:
                 current = copy.deepcopy(self.state)
@@ -387,6 +475,34 @@ class Bridge:
                     self.registration = {'code': secrets.token_hex(16), 'expires': int(time.time()) + 600}
                     self.registration_error = ''
                 return 'Comando generato: invialo nel gruppo o topic da collegare entro 10 minuti, poi aggiorna lo stato.'
+            if operation == 'select':
+                with self.lock:
+                    destination = self.destinations().get(destination_key)
+                    if not destination:
+                        raise BridgeError('Scegli una destinazione registrata.')
+                    self.state['destination'] = destination
+                    self.state.pop('test', None)
+                    self.save()
+                return 'Destinazione selezionata per le prove.'
+            if operation == 'create_topic':
+                destination = current.get('destination')
+                if not destination or not isinstance(topic_name, str) or not 1 <= len(topic_name.strip()) <= 128:
+                    raise BridgeError('Seleziona un gruppo forum e indica un nome topic da 1 a 128 caratteri.')
+                chat = self.permissions(token, destination['chat_id'], current['bot']['id'])
+                member = self.api(token, 'getChatMember', {'chat_id': destination['chat_id'], 'user_id': current['bot']['id']})
+                if not chat.get('is_forum') or member.get('status') not in ('administrator', 'creator') or not member.get('can_manage_topics'):
+                    raise BridgeError('Il bot deve essere amministratore di un forum con permesso can_manage_topics.')
+                topic = self.api(token, 'createForumTopic', {'chat_id': destination['chat_id'], 'name': topic_name.strip()})
+                if not isinstance(topic, dict) or not topic.get('message_thread_id'):
+                    raise BridgeError('Creazione topic non confermata. Controlla Telegram prima di riprovare.')
+                destination = dict(destination, message_thread_id=topic['message_thread_id'])
+                with self.lock:
+                    self.state['destinations'] = self.destinations()
+                    self.state['destinations'][self.destination_key(destination)] = destination
+                    self.state['destination'] = destination
+                    self.state.pop('test', None)
+                    self.save()
+                return 'Topic creato e registrato. Associalo ai gruppi host nella pagina Destinazioni.'
             if operation not in ('send', 'edit'):
                 raise BridgeError('Operazione non valida.')
             destination = current.get('destination')
@@ -446,6 +562,8 @@ class Bridge:
                 with self.lock:
                     if (current.get('destination', {}).get('chat_id'), current.get('destination', {}).get('message_thread_id')) != (chat_id, thread):
                         self.state.pop('test', None)
+                    self.state['destinations'] = self.destinations()
+                    self.state['destinations'][self.destination_key(destination)] = destination
                     self.state['destination'] = destination
                     self.save()
                     self.registration = None
@@ -516,7 +634,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self.server.bridge.authorized(self.headers.get('Authorization', '')):
                 self.reply(401, {'error': 'Autenticazione locale non valida.'})
                 return
-        elif not control or self.path not in ('/action', '/channel'):
+        elif not control or self.path not in ('/action', '/channel', '/routing'):
             self.reply(404, {'error': 'Percorso non disponibile.'})
             return
         try:
@@ -528,10 +646,12 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError
             if self.path == '/notify':
                 result = self.server.bridge.notify(data)
+            elif self.path == '/routing':
+                result = self.server.bridge.configure_routing(data)
             elif self.path == '/channel':
                 result = self.server.bridge.channel()
             else:
-                result = {'message': self.server.bridge.action(data.get('operation'), data.get('token', ''))}
+                result = {'message': self.server.bridge.action(data.get('operation'), data.get('token', ''), data.get('destination_key', ''), data.get('topic_name', ''))}
             self.reply(200, result)
         except (ValueError, TypeError):
             self.reply(400, {'error': 'Richiesta non valida.'})

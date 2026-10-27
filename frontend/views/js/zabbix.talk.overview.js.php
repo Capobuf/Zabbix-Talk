@@ -12,6 +12,8 @@
             register: connected && !!state.bot,
             send: connected && !!state.destination,
             edit: connected && !!state.test,
+            select: connected && !!state.destination,
+            create_topic: connected && !!state.destination,
             provision: connected && !!state.destination,
             transport: connected && data.notifications.ready,
             prepare_test: connected && data.notifications.ready && !data.notifications.config.fixture,
@@ -22,6 +24,13 @@
         document.querySelectorAll('button[name="operation"]').forEach(button => {
             button.disabled = !allowed[button.value];
         });
+        const select = document.querySelector('#talk-select z-select');
+        for (const [value, destination] of Object.entries(state.destinations || {})) {
+            if (!select.getOptionByValue(value)) {
+                select.addOption({value, label: `${destination.title} · ${destination.chat_id} · topic ${destination.message_thread_id || 'Generale'}`});
+            }
+        }
+        if (state.destination) select.value = `${state.destination.chat_id}:${state.destination.message_thread_id || ''}`;
         document.getElementById('token').disabled = !allowed.connect;
     };
 
@@ -44,7 +53,8 @@
                 throw new Error();
             }
             for (const [key, value] of Object.entries(data.labels)) {
-                document.getElementById(`talk-label-${key}`).textContent = value;
+                const label = document.getElementById(`talk-label-${key}`);
+                if (label) label.textContent = value;
             }
             const bridge = document.getElementById('talk-label-bridge');
             bridge.classList.toggle('green', data.bridge_reachable);
@@ -69,14 +79,6 @@
         }
     }));
 
-    const setup = document.getElementById('talk-notifications');
-    setup.addEventListener('submit', event => {
-        if (!document.getElementById('confirm').checked) {
-            event.preventDefault();
-            feedback.textContent = <?= json_encode(_('Seleziona la conferma amministratore prima di attivare le notifiche.')) ?>;
-            document.getElementById('confirm').focus();
-        }
-    });
     const copy = document.getElementById('talk-copy');
     copy.addEventListener('click', async () => {
         const message = document.getElementById('talk-copy-feedback');
