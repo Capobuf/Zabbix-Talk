@@ -120,6 +120,8 @@ class Notifications {
             $message = $enabled ? (empty($config['recovery_enabled'])
                 ? _('Salva e attiva notifiche per abilitare anche i RECOVERY sugli eventi successivi.')
                 : _('Action PROBLEM/RECOVERY attiva e risorse sincronizzate.')) : _('Action disabilitata.');
+            $message .= !empty($telegram['ack_enabled']) ? _(' ACK da Telegram abilitati.')
+                : _(' Salva nuovamente le destinazioni per abilitare gli ACK da Telegram.');
         }
         return ['config' => array_diff_key($config, ['observed' => true]),
             'ready' => $same_telegram && !$changed && $enabled, 'message' => $message];
@@ -203,6 +205,8 @@ class Notifications {
         $channel = BridgeClient::request('/channel', ['operation' => 'channel']);
         $routes = $routes ?? [['groupid' => $groupid, 'group_name' => $groups[0]['name'], 'destination' => $state['destination']]];
         $this->preview($routes, $choices);
+        BridgeClient::request('/ack-permissions', ['destinations' => array_values(array_unique(array_map(
+            static fn($route) => $route['destination']['chat_id'].':'.($route['destination']['message_thread_id'] ?? ''), $routes)))]);
         $rights = [];
         foreach (self::ok(API::HostGroup()->get(['output' => ['groupid', 'name']])) as $group) {
             foreach ($routes as $route) {
@@ -229,7 +233,12 @@ class Notifications {
             $this->put('role', API::Role(), 'roleid', [
                 'name' => 'Zabbix Talk - Notify', 'type' => USER_TYPE_ZABBIX_USER,
                 'rules' => ['ui.default_access' => 0, 'ui' => [['name' => 'monitoring.problems', 'status' => 1]],
-                    'api.access' => 1, 'api.mode' => ZBX_ROLE_RULE_API_MODE_ALLOW, 'api' => ['host.get', 'hostgroup.get', 'event.get'], 'actions.default_access' => 0, 'modules.default_access' => 0]
+                    'api.access' => 1, 'api.mode' => ZBX_ROLE_RULE_API_MODE_ALLOW,
+                    'api' => ['host.get', 'hostgroup.get', 'event.get', 'event.acknowledge'],
+                    'actions.default_access' => 0, 'actions' => [
+                        ['name' => 'acknowledge_problems', 'status' => 1],
+                        ['name' => 'add_problem_comments', 'status' => 1]
+                    ], 'modules.default_access' => 0]
             ], $existing, $config);
             // Keep previously granted read scope so native RECOVERY can reach the original recipient after rerouting.
             foreach ($existing['group']['hostgroup_rights'] ?? [] as $right) {
@@ -309,7 +318,7 @@ class Notifications {
         $path = rtrim(dirname($_SERVER['SCRIPT_NAME']), '/').'/api_jsonrpc.php';
         BridgeClient::request('/routing', ['routes' => $routes, 'choices' => (object) $choices,
             'api_url' => 'http://127.0.0.1'.$path, 'api_token' => $this->routing_token,
-            'revision' => $this->routing_revision]);
+            'revision' => $this->routing_revision, 'ack_enabled' => true]);
         return $message;
     }
 
@@ -469,12 +478,13 @@ class Notifications {
         if (!$fixture) {
             return _('Nessun host di prova creato.');
         }
-        $events = self::ok(API::Event()->get(['output' => ['eventid', 'clock', 'name', 'severity', 'r_eventid'],
+        $events = self::ok(API::Event()->get(['output' => ['eventid', 'clock', 'name', 'severity', 'r_eventid', 'acknowledged'],
             'source' => EVENT_SOURCE_TRIGGERS, 'object' => EVENT_OBJECT_TRIGGER,
             'objectids' => [$fixture['triggerid']], 'value' => TRIGGER_VALUE_TRUE,
             'sortfield' => 'eventid', 'sortorder' => 'DESC', 'limit' => 1]));
         return 'Host ID '.$fixture['hostid'].' · trigger ID '.$fixture['triggerid'].' · '.($events
             ? 'PROBLEM eventid '.$events[0]['eventid'].' · '.zbx_date2str(DATE_TIME_FORMAT_SECONDS, $events[0]['clock'])
+                .($events[0]['acknowledged'] === '1' ? _(' · riconosciuto in Zabbix') : _(' · non riconosciuto'))
                 .($events[0]['r_eventid'] !== '0' ? ' · RECOVERY eventid '.$events[0]['r_eventid'] : _(' · ancora aperto'))
             : _('Nessun evento PROBLEM rilevato.'));
     }

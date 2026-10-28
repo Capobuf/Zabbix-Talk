@@ -68,6 +68,15 @@ class Overview extends CController {
                 ]))
             ]
         ];
+        $audit = [];
+        foreach ($status['audit'] ?? [] as $entry) {
+            $audit[] = zbx_date2str(DATE_TIME_FORMAT_SECONDS, $entry['created_at']).' · '.$entry['operation']
+                .' · eventid '.($entry['eventid'] ?: '—').' · '.$entry['actor']
+                .' · chat_id '.$entry['chat_id'].($entry['thread_id'] ? ' · topic '.$entry['thread_id'] : '')
+                .' · '.$entry['detail'];
+        }
+        $data['labels']['ack_audit'] = $bridge_error !== '' ? _('Audit non disponibile: verifica il bridge.')
+            : ($audit ? implode("\n", $audit) : _('Nessuna operazione Telegram registrata.'));
         if ($bridge_error !== '') {
             foreach (['bot', 'polling', 'verified', 'destination', 'topic', 'test', 'updated'] as $label) {
                 $data['labels'][$label] = _('Stato non disponibile: verifica il bridge.');

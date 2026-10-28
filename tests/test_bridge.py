@@ -16,6 +16,7 @@ class TelegramFlowTest(unittest.TestCase):
         self.bridge = Bridge(self.path)
         self.calls = []
         self.member_status = 'administrator'
+        self.actor_status = None
         self.deleted = False
         self.next_message = 41
         self.token = '123456:' + 'x' * 35
@@ -34,7 +35,11 @@ class TelegramFlowTest(unittest.TestCase):
             return {'id': -1001, 'type': 'supergroup', 'title': 'Test',
                     'permissions': {'can_send_messages': True}}
         if method == 'getChatMember':
+            if params['user_id'] != 123456 and self.actor_status is not None:
+                return {'status': self.actor_status}
             return {'status': self.member_status}
+        if method == 'answerCallbackQuery':
+            return True
         if method == 'editMessageText' and self.deleted:
             raise BridgeError('Telegram 400: message to edit not found')
         if method in ('sendRichMessage', 'editMessageText'):
@@ -425,6 +430,172 @@ class TelegramFlowTest(unittest.TestCase):
         self.assertEqual(old.status()['notifications'][0]['message_id'], 42)
         with self.assertRaisesRegex(BridgeError, 'precedente al supporto RECOVERY'):
             old.notify(self.recovery())
+
+    def ack_fixture(self):
+        self.actor_status = None
+        self.routing()
+        self.bridge.configure_routing(dict(self.bridge.state['routing'], ack_enabled=True))
+        self.actor_status = 'member'
+        self.zabbix_calls = []
+        self.native_event = {'eventid': '99', 'acknowledged': '0', 'r_eventid': '0',
+                             'hosts': [{'hostid': '17'}], 'acknowledges': []}
+
+        def zabbix(routing, method, params):
+            self.zabbix_calls.append((method, params))
+            if method == 'event.get':
+                return [json.loads(json.dumps(self.native_event))]
+            if method == 'hostgroup.get':
+                return [{'groupid': '1', 'name': 'Client A'}, {'groupid': '2', 'name': 'Client B'}]
+            if method == 'host.get':
+                return [{'hostgroups': [{'groupid': '1', 'name': 'Client A'}]}]
+            if method == 'event.acknowledge':
+                self.assertEqual(params['action'], 6)
+                self.assertEqual(params['eventids'], ['99'])
+                self.native_event['acknowledged'] = '1'
+                self.native_event['acknowledges'].append({'acknowledgeid': '1', 'action': '6', 'message': params['message']})
+                return {'eventids': ['99']}
+            raise AssertionError(method)
+
+        mocked = patch.object(Bridge, 'zabbix_api', side_effect=zabbix)
+        mocked.start()
+        self.addCleanup(mocked.stop)
+        self.bridge.notify(self.notification(routing_revision='v1'))
+        self.ack_message_id = self.calls[-1][1].get('message_id', self.next_message)
+        self.ack_data = self.calls[-1][1]['reply_markup']['inline_keyboard'][0][0]['callback_data']
+        self.assertLessEqual(len(self.ack_data.encode()), 64)
+
+    def ack_query(self, **changes):
+        query = {'id': 'callback1', 'data': self.ack_data,
+                 'from': {'id': 99, 'is_bot': False, 'first_name': 'Mario <&>', 'username': 'mario'},
+                 'message': {'message_id': self.ack_message_id, 'date': 1, 'from': {'id': 123456, 'is_bot': True},
+                             'chat': {'id': -1001, 'type': 'supergroup'}, 'message_thread_id': 17}}
+        return dict(query, **changes)
+
+    def test_member_ack_is_native_audited_and_persistent_without_duplicate_comments(self):
+        self.ack_fixture()
+        self.bridge = Bridge(self.path)
+        self.bridge.callback(self.ack_query(), self.token)
+        self.assertEqual(self.native_event['acknowledged'], '1')
+        comment = self.native_event['acknowledges'][0]['message']
+        self.assertIn('Mario <&>', comment)
+        self.assertIn('Telegram ID 99', comment)
+        self.assertIn('Chat -1001; topic 17', comment)
+        edit = next(params for method, params in self.calls if method == 'editMessageText')
+        self.assertEqual(edit['message_id'], 42)
+        self.assertEqual(edit['reply_markup'], {'inline_keyboard': []})
+        self.assertIn('Riconosciuto in Zabbix', edit['rich_message']['html'])
+        self.assertIn('Mario &lt;&amp;&gt;', edit['rich_message']['html'])
+        self.bridge = Bridge(self.path)
+        self.bridge.callback(self.ack_query(), self.token)
+        self.bridge.callback(self.ack_query(id='callback2', **{'from': {'id': 100, 'first_name': 'Luca'}}), self.token)
+        self.assertEqual(len(self.native_event['acknowledges']), 1)
+        self.assertNotIn('Luca', next(params for method, params in reversed(self.calls) if method == 'editMessageText')['rich_message']['html'])
+        self.assertEqual(len(self.bridge.status()['audit']), 2)
+        self.assertEqual(self.bridge.status()['audit'][0]['status'], 'confirmed')
+        self.assertNotIn(self.ack_data, json.dumps(self.bridge.status()))
+        self.assertNotIn('api_token', json.dumps(self.bridge.status()))
+
+    def test_ack_rejects_forged_context_and_non_members_without_zabbix_mutation(self):
+        self.ack_fixture()
+        original = self.ack_query()
+        changes = [
+            {'data': 'ack:' + '0' * 32}, {'inline_message_id': 'forwarded'},
+            {'from': {'id': 99, 'is_bot': True}}, {'from': {}},
+            *[{'message': dict(original['message'], **fields)} for fields in [
+                {'date': 0}, {'from': {'id': 777}}, {'chat': {'id': -1002, 'type': 'supergroup'}},
+                {'message_id': 51}, {'message_thread_id': 18}]]]
+        for i, fields in enumerate(changes):
+            self.bridge.callback(self.ack_query(**dict(fields, id='invalid' + str(i))), self.token)
+        for status in ('left', 'kicked', 'restricted'):
+            self.actor_status = status
+            self.bridge.callback(self.ack_query(id=status), self.token)
+        self.assertFalse(any(method == 'event.acknowledge' for method, _ in self.zabbix_calls))
+        self.assertFalse(any(method == 'editMessageText' for method, _ in self.calls))
+        self.assertTrue(all(row['status'] == 'denied' for row in self.bridge.status()['audit']))
+
+    def test_ack_rechecks_bot_permissions_and_current_routing(self):
+        self.ack_fixture()
+        self.member_status = 'member'
+        self.bridge.callback(self.ack_query(), self.token)
+        self.assertIn('amministratore', self.bridge.status()['audit'][0]['detail'])
+        self.member_status = 'administrator'
+        self.bridge.state['routing']['routes'] = []
+        self.bridge.callback(self.ack_query(id='no-route'), self.token)
+        self.assertIn('non più autorizzata', self.bridge.status()['audit'][0]['detail'])
+        self.assertFalse(any(method == 'event.acknowledge' for method, _ in self.zabbix_calls))
+
+    def test_external_ack_is_reflected_without_attributing_it_to_the_clicking_member(self):
+        self.ack_fixture()
+        self.native_event['acknowledged'] = '1'
+        self.native_event['acknowledges'] = [{'acknowledgeid': '1', 'action': '2', 'message': ''}]
+        self.bridge.callback(self.ack_query(), self.token)
+        self.assertFalse(any(method == 'event.acknowledge' for method, _ in self.zabbix_calls))
+        edit = next(params for method, params in self.calls if method == 'editMessageText')
+        self.assertIn('Riconosciuto in Zabbix', edit['rich_message']['html'])
+        self.assertNotIn('Mario', edit['rich_message']['html'])
+
+    def test_resolved_event_never_gets_ack_or_repainted_as_open(self):
+        self.ack_fixture()
+        self.native_event['r_eventid'] = '100'
+        self.bridge.callback(self.ack_query(), self.token)
+        self.assertFalse(any(method == 'event.acknowledge' for method, _ in self.zabbix_calls))
+        self.assertFalse(any(method == 'editMessageText' for method, _ in self.calls))
+        self.assertEqual(self.bridge.status()['audit'][0]['status'], 'resolved')
+
+    def test_ack_denied_by_zabbix_and_failed_telegram_edit_do_not_claim_full_success(self):
+        self.ack_fixture()
+        api = self.bridge.zabbix_api
+        def deny(routing, method, params):
+            if method == 'event.acknowledge':
+                raise BridgeError('Zabbix ha rifiutato event.acknowledge.')
+            return api(routing, method, params)
+        with patch.object(self.bridge, 'zabbix_api', side_effect=deny):
+            self.bridge.callback(self.ack_query(), self.token)
+        self.assertEqual(self.native_event['acknowledged'], '0')
+        self.assertEqual(self.bridge.status()['audit'][0]['status'], 'failed')
+        self.assertFalse(any(method == 'editMessageText' for method, _ in self.calls))
+        self.deleted = True
+        self.bridge.callback(self.ack_query(id='retry'), self.token)
+        self.assertEqual(self.native_event['acknowledged'], '1')
+        self.assertEqual(self.bridge.status()['audit'][0]['status'], 'telegram_failed')
+        self.assertIn('non aggiornato', self.calls[-1][1]['text'])
+
+    def test_uncertain_ack_after_restart_reads_native_state_without_repeating_mutation(self):
+        for committed in (True, False):
+            with self.subTest(committed=committed):
+                self.ack_fixture()
+                api = self.bridge.zabbix_api
+                def uncertain(routing, method, params):
+                    if method == 'event.acknowledge':
+                        if committed:
+                            api(routing, method, params)
+                        raise BridgeError('Risposta interrotta', uncertain=True)
+                    return api(routing, method, params)
+                with patch.object(self.bridge, 'zabbix_api', side_effect=uncertain):
+                    self.bridge.callback(self.ack_query(), self.token)
+                self.assertEqual(self.bridge.status()['audit'][0]['status'], 'uncertain')
+                self.bridge = Bridge(self.path)
+                before = len(self.native_event['acknowledges'])
+                self.bridge.callback(self.ack_query(id='after-restart'), self.token)
+                self.assertEqual(len(self.native_event['acknowledges']), before)
+                self.assertEqual(self.bridge.status()['audit'][0]['status'], 'confirmed' if committed else 'denied')
+                with self.bridge.receipts() as db:
+                    db.execute('DELETE FROM audit')
+                    db.execute('DELETE FROM receipts')
+
+    def test_poll_dispatches_callbacks_and_persists_offset(self):
+        self.ack_fixture()
+        api = self.bridge.api
+        def poll(token, method, params=None):
+            if method == 'getUpdates':
+                self.assertIn('callback_query', params['allowed_updates'])
+                self.bridge.stop.set()
+                return [{'update_id': 42, 'callback_query': self.ack_query()}]
+            return api(token, method, params)
+        with patch.object(self.bridge, 'api', side_effect=poll):
+            self.bridge.poll()
+        self.assertEqual(Bridge(self.path).state['offset'], 43)
+        self.assertEqual(self.native_event['acknowledged'], '1')
 
 
 if __name__ == '__main__':

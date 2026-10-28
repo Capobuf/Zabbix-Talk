@@ -35,6 +35,7 @@ foreach (['Non classificato', 'Informazione', 'Avviso', 'Media', 'Alta', 'Disast
 $form->addItem(new CTag('p', true, _('Severità native Zabbix, 24/7:')))
     ->addItem((new CCheckBoxList('severities'))->setOptions($options)->setChecked($data['severities'])->setColumns(3))
     ->addItem(new CTag('p', true, (new CCheckBox('confirm', '1'))->setLabel(_('Confermo aggiornamento delle risorse gestite e attivazione per queste associazioni. Nessuna associazione disabilita l’Action.'))))
+    ->addItem(new CTag('p', true, _('Il salvataggio abilita Riconosci nei nuovi messaggi PROBLEM. Tutti i membri attuali del gruppo possono eseguire l’ACK nativo, con identità Telegram nel commento Zabbix e nell’audit. Il bot deve essere amministratore in ogni gruppo associato per verificarne i membri. Non servono permessi per eliminare messaggi o gestire utenti.')))
     ->addItem(new CTag('p', true, _('Il salvataggio ricalcola gli host. Prima di ogni nuovo PROBLEM il bridge legge le appartenenze correnti via API: un nuovo conflitto blocca l’invio. Riapri questa pagina per vederlo. I messaggi già inviati e i loro RECOVERY restano nella destinazione originale.')))
     ->addItem(makeFormFooter(new CSubmitButton(_('Anteprima'), 'operation', 'preview'), [
         new CSubmitButton(_('Salva e attiva routing'), 'operation', 'save')]));
