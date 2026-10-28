@@ -15,7 +15,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -91,6 +91,14 @@ class Bridge:
                        'callback_id TEXT PRIMARY KEY, operation TEXT, eventid TEXT, telegram_userid TEXT, actor TEXT, '
                        'chat_id TEXT, thread_id TEXT, message_id INTEGER, created_at INTEGER, updated_at INTEGER, '
                        'status TEXT, detail TEXT, comment TEXT)')
+            db.execute('CREATE TABLE IF NOT EXISTS snoozes ('
+                       'eventid TEXT, chat_id TEXT, thread_id TEXT, telegram_userid TEXT, actor TEXT, '
+                       'until_at INTEGER, status TEXT, callback_id TEXT, reminder_id INTEGER, '
+                       'next_check INTEGER, detail TEXT, PRIMARY KEY(eventid,chat_id,thread_id))')
+            if 'duration_minutes' not in {row[1] for row in db.execute('PRAGMA table_info(snoozes)')}:
+                db.execute('ALTER TABLE snoozes ADD COLUMN duration_minutes INTEGER')
+            db.execute("UPDATE snoozes SET status='unconfirmed', detail=? WHERE status='sending'",
+                       ('Invio promemoria interrotto: controlla Telegram; nessun reinvio automatico.',))
 
     def receipts(self):
         return sqlite3.connect(self.receipts_path)
@@ -276,7 +284,7 @@ class Bridge:
             rich = self.event_message(data)
             params = {'chat_id': int(data['chat_id']), 'rich_message': rich}
             if ack_key:
-                params['reply_markup'] = self.ack_keyboard(ack_key)
+                params['reply_markup'] = self.incident_keyboard(ack_key)
             if thread:
                 params['message_thread_id'] = int(thread)
             try:
@@ -306,7 +314,7 @@ class Bridge:
         return value
 
     @staticmethod
-    def event_message(data, recovery=None, ack_label=''):
+    def event_message(data, recovery=None, ack_label='', snooze_label='', reminder=False):
         if data['kind'] == 'transport':
             return Bridge.test_message(transport=True)
         leds = ['⚪', '🔵', '🟡', '🟠', '🔴', '🔴']
@@ -318,9 +326,13 @@ class Bridge:
         content = '<h3>' + led + ' ' + ('RISOLTO' if recovery else html.escape(host)) + '</h3>'
         if not recovery and data['kind'] == 'update':
             content += '<p><b>AGGIORNAMENTO</b></p>'
+        if reminder and not recovery:
+            content += '<p><b>PROMEMORIA</b> · Problema ancora aperto in Zabbix</p>'
         content += '<blockquote><p>' + html.escape(data['problem']) + '</p></blockquote>'
         if ack_label:
             content += '<p><b>Riconosciuto in Zabbix</b>' + (' · ' + html.escape(ack_label) if ack_label != 'Zabbix' else '') + '</p>'
+        if snooze_label and not recovery:
+            content += '<p>' + html.escape(snooze_label) + '</p>'
         started = Bridge.message_time(data['occurred_at'])
         if recovery:
             content += '<footer>' + html.escape(started) + ' → ' + html.escape(
@@ -348,6 +360,15 @@ class Bridge:
     def ack_keyboard(key=''):
         return {'inline_keyboard': [[{'text': 'Riconosci', 'callback_data': 'ack:' + key}]] if key else []}
 
+    @staticmethod
+    def incident_keyboard(key, acknowledged=False):
+        rows = [] if acknowledged else Bridge.ack_keyboard(key)['inline_keyboard']
+        for options in [[('30 min', '30'), ('2 ore', '120')], [('8 ore', '480'), ('24 ore', '1440')],
+                        [('Durata personalizzata', 'custom')]]:
+            rows.append([{'text': 'Sospendi ' + label if value != 'custom' else label,
+                          'callback_data': 'snz:' + key + ':' + value} for label, value in options])
+        return {'inline_keyboard': rows}
+
     def audit_result(self, callback_id, status, detail):
         with self.receipts() as db:
             db.execute('UPDATE audit SET status=?,detail=?,updated_at=? WHERE callback_id=?',
@@ -366,7 +387,7 @@ class Bridge:
             raise BridgeError('Stato ACK Zabbix non verificabile.')
         return event
 
-    def acknowledge(self, query, token, current, original, previous):
+    def authorize_incident(self, query, token, current, original):
         message = query.get('message', {})
         sender = query.get('from', {})
         routing = current.get('routing', {})
@@ -385,12 +406,17 @@ class Bridge:
         member = self.api(token, 'getChatMember', {'chat_id': int(original['chat_id']), 'user_id': sender['id']})
         if (member.get('status') not in ('creator', 'administrator', 'member')
                 and not (member.get('status') == 'restricted' and member.get('is_member') is True)):
-            raise BridgeError('Non sei un membro attuale del gruppo. Nessun ACK.')
+            raise BridgeError('Non sei un membro attuale del gruppo. Operazione rifiutata.')
         groups = self.host_groups(routing, original['hostid'], original['eventid'])
         destination = self.resolve(groups, routing['routes'], routing['choices'], original['hostid'])
         if not destination or self.destination_key(destination) != original['chat_id'] + ':' + original['thread_id']:
-            raise BridgeError('Destinazione non più autorizzata per questo host. Nessun ACK.')
-        event = self.ack_event(routing, original)
+            raise BridgeError('Destinazione non più autorizzata per questo host. Operazione rifiutata.')
+        return self.ack_event(routing, original)
+
+    def acknowledge(self, query, token, current, original, previous):
+        routing = current.get('routing', {})
+        sender = query.get('from', {})
+        event = self.authorize_incident(query, token, current, original)
         if str(event['r_eventid']) != '0':
             self.audit_result(query['id'], 'resolved', 'Problema già risolto in Zabbix; nessun ACK eseguito.')
             return 'Problema già risolto in Zabbix. Nessun ACK eseguito.'
@@ -423,28 +449,103 @@ class Bridge:
         self.audit_result(query['id'], 'confirmed', 'ACK nativo verificato in Zabbix; aggiornamento Telegram in corso.')
         if str(event['r_eventid']) != '0':
             return 'ACK verificato in Zabbix. Il problema risulta ora risolto.'
-        label = 'Zabbix'
-        acknowledgements = sorted(event.get('acknowledges', []), key=lambda ack: int(ack['acknowledgeid']), reverse=True)
-        latest = next((ack for ack in acknowledgements if int(ack['action']) & 2), None)
-        if latest and latest['message']:
-            with self.receipts() as db:
-                actor = db.execute('SELECT actor FROM audit WHERE eventid=? AND comment=?',
-                                   (original['eventid'], latest['message'])).fetchone()
-            if actor:
-                label = actor[0]
-        params = {'chat_id': int(original['chat_id']), 'message_id': original['message_id'],
-                  'rich_message': self.event_message(json.loads(original['payload']), ack_label=label),
-                  'reply_markup': self.ack_keyboard()}
         try:
-            message = self.api(token, 'editMessageText', params)
-            if not isinstance(message, dict) or message.get('message_id') != original['message_id'] or not message.get('rich_message'):
-                raise BridgeError('Telegram non ha confermato la modifica.')
+            self.edit_incident(token, original, event)
         except BridgeError as error:
             if 'message is not modified' not in str(error):
                 self.audit_result(query['id'], 'telegram_failed', 'ACK verificato in Zabbix; messaggio non aggiornato. ' + str(error))
                 return 'ACK verificato in Zabbix; messaggio Telegram non aggiornato. Consulta l’audit.'
         self.audit_result(query['id'], 'confirmed', 'ACK verificato in Zabbix e messaggio Telegram aggiornato.')
         return 'Evento riconosciuto in Zabbix. Messaggio aggiornato.'
+
+    def snooze_row(self, original):
+        with self.receipts() as db:
+            db.row_factory = sqlite3.Row
+            return db.execute('SELECT * FROM snoozes WHERE eventid=? AND chat_id=? AND thread_id=?',
+                              (original['eventid'], original['chat_id'], original['thread_id'])).fetchone()
+
+    @staticmethod
+    def snooze_description(snooze):
+        minutes = snooze['duration_minutes']
+        duration = []
+        if minutes:
+            for unit, singular, plural in [(1440, 'giorno', 'giorni'), (60, 'ora', 'ore'), (1, 'minuto', 'minuti')]:
+                count, minutes = divmod(minutes, unit)
+                if count:
+                    duration.append(str(count) + ' ' + (singular if count == 1 else plural))
+        deadline = datetime.fromtimestamp(snooze['until_at'], timezone.utc).strftime('%d/%m/%Y %H:%M UTC')
+        return 'Snooze' + (' di ' + ' e '.join(duration) if duration else ' attivo') + ' · fino al ' + deadline
+
+    def edit_incident(self, token, original, event):
+        ack_label = ''
+        if str(event['acknowledged']) == '1':
+            ack_label = 'Zabbix'
+            acknowledgements = sorted(event.get('acknowledges', []), key=lambda ack: int(ack['acknowledgeid']), reverse=True)
+            latest = next((ack for ack in acknowledgements if int(ack['action']) & 2), None)
+            if latest and latest['message']:
+                with self.receipts() as db:
+                    actor = db.execute("SELECT actor FROM audit WHERE operation='ACK' AND eventid=? AND comment=?",
+                                       (original['eventid'], latest['message'])).fetchone()
+                if actor:
+                    ack_label = actor[0]
+        snooze = self.snooze_row(original)
+        label = ''
+        if snooze:
+            if snooze['status'] == 'active':
+                label = self.snooze_description(snooze) + ' · Sospeso in questa destinazione · ' + snooze['actor']
+            else:
+                label = snooze['detail']
+        params = {'chat_id': int(original['chat_id']), 'message_id': original['message_id'],
+                  'rich_message': self.event_message(json.loads(original['payload']),
+                      ack_label=ack_label, snooze_label=label),
+                  'reply_markup': self.incident_keyboard(original['ack_key'], str(event['acknowledged']) == '1')}
+        try:
+            message = self.api(token, 'editMessageText', params)
+            if not isinstance(message, dict) or message.get('message_id') != original['message_id'] or not message.get('rich_message'):
+                raise BridgeError('Telegram non ha confermato la modifica.')
+        except BridgeError as error:
+            if 'message is not modified' not in str(error):
+                raise
+
+    def snooze(self, query, token, current, original, previous):
+        event = self.authorize_incident(query, token, current, original)
+        if str(event['r_eventid']) != '0':
+            self.audit_result(query['id'], 'resolved', 'Problema già risolto in Zabbix; nessuno snooze attivato.')
+            return 'Problema già risolto in Zabbix.'
+        duration = query['data'].split(':')[2]
+        if duration == 'custom':
+            result = ('Rispondi al messaggio originale con /snooze@' + current['bot']['username']
+                      + ' 45m (oppure 3h, 2d). Da 1 minuto a 30 giorni. Solo questo incidente in questa destinazione.')
+            self.audit_result(query['id'], 'instructions', 'Mostrate istruzioni per la durata personalizzata.')
+            return result
+        minutes = int(duration)
+        if not 1 <= minutes <= 43200:
+            raise BridgeError('Durata non valida: scegli da 1 minuto a 30 giorni.')
+        if previous and not self.snooze_row(original):
+            raise BridgeError('Richiesta precedente interrotta prima del salvataggio. Premi nuovamente la durata scelta.')
+        if not previous:
+            until = int(time.time()) + minutes * 60
+            sender = query['from']
+            with self.receipts() as db:
+                db.execute('INSERT INTO snoozes '
+                           '(eventid,chat_id,thread_id,telegram_userid,actor,until_at,status,callback_id,reminder_id,next_check,detail,duration_minutes) '
+                           'VALUES (?,?,?,?,?,?,?,?,?,?,?,?) '
+                           'ON CONFLICT(eventid,chat_id,thread_id) DO UPDATE SET '
+                           'telegram_userid=excluded.telegram_userid,actor=excluded.actor,until_at=excluded.until_at,'
+                           'status=excluded.status,callback_id=excluded.callback_id,reminder_id=NULL,'
+                           'next_check=excluded.next_check,detail=excluded.detail,duration_minutes=excluded.duration_minutes',
+                           (original['eventid'], original['chat_id'], original['thread_id'], str(sender['id']),
+                            self.actor_name(sender), until, 'active', query['id'], None, until,
+                            'Snooze attivo per tutti i membri in questa destinazione.', minutes))
+                db.execute('UPDATE audit SET status=?,detail=?,updated_at=? WHERE callback_id=?',
+                           ('confirmed', 'Snooze salvato fino al ' + datetime.fromtimestamp(until, timezone.utc).isoformat(),
+                            int(time.time()), query['id']))
+        try:
+            self.edit_incident(token, original, event)
+        except BridgeError as error:
+            self.audit_result(query['id'], 'telegram_failed', 'Snooze salvato; messaggio non aggiornato. ' + str(error))
+            return 'Snooze salvato; messaggio Telegram non aggiornato. Consulta l’audit.'
+        return self.snooze_description(self.snooze_row(original)) + '. Condiviso in questa destinazione.'
 
     @staticmethod
     def actor_name(sender):
@@ -466,18 +567,21 @@ class Bridge:
             sender = query.get('from', {})
             message = query.get('message', {})
             key = query.get('data', '')
+            match = re.fullmatch(r'(ack|snz):([a-f0-9]{32})(?::(custom|[1-9][0-9]{0,4}))?', key) if isinstance(key, str) else None
+            is_snooze = bool(match and match[1] == 'snz' and match[3])
+            valid = match and ((match[1] == 'ack' and match[3] is None) or is_snooze)
             with self.receipts() as db:
                 db.row_factory = sqlite3.Row
                 original = db.execute('SELECT * FROM receipts WHERE ack_key=?',
-                                     (key[4:] if isinstance(key, str) and re.fullmatch(r'ack:[a-f0-9]{32}', key) else '',)).fetchone()
+                                      (match[2] if valid else '',)).fetchone()
                 previous = db.execute('SELECT status FROM audit WHERE callback_id=?', (callback_id,)).fetchone()
                 db.execute('INSERT OR IGNORE INTO audit VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                           (callback_id, 'ACK', original['eventid'] if original else '', str(sender.get('id', ''))[:20],
+                           (callback_id, 'SNOOZE' if is_snooze else 'ACK', original['eventid'] if original else '', str(sender.get('id', ''))[:20],
                             self.actor_name(sender), str(message.get('chat', {}).get('id', ''))[:24],
                             str(message.get('message_thread_id') or '')[:20], message.get('message_id'),
                             int(time.time()), int(time.time()), 'checking', 'Verifica autorizzazione in corso.', ''))
             try:
-                result = self.acknowledge(query, token, current, original, previous)
+                result = (self.snooze if is_snooze else self.acknowledge)(query, token, current, original, previous)
             except BridgeError as error:
                 with self.receipts() as db:
                     status = db.execute('SELECT status FROM audit WHERE callback_id=?', (callback_id,)).fetchone()[0]
@@ -486,11 +590,108 @@ class Bridge:
                 elif status == 'confirmed' and not previous:
                     self.audit_result(callback_id, 'uncertain', 'Richiesta ACK confermata; stato corrente non verificato. ' + str(error))
                 result = str(error)
-            try:
-                self.api(token, 'answerCallbackQuery', {'callback_query_id': callback_id, 'text': result[:200], 'show_alert': True})
-            except BridgeError:
-                # Callback answers expire; the persisted audit remains available in the frontend.
-                pass
+            if not query.get('_command'):
+                try:
+                    self.api(token, 'answerCallbackQuery', {'callback_query_id': callback_id, 'text': result[:200], 'show_alert': True})
+                except BridgeError:
+                    # Callback answers expire; the persisted audit remains available in the frontend.
+                    pass
+            return result
+
+    def snooze_command(self, message, token):
+        text = message.get('text', '')
+        match = re.fullmatch(r'/snooze(?:@([A-Za-z0-9_]+))?\s+([1-9][0-9]{0,4})([mhd])', text.strip())
+        with self.lock:
+            current = copy.deepcopy(self.state)
+        if not text.startswith('/snooze') or token != current.get('token'):
+            return
+        if match and match[1] and match[1].lower() != current['bot']['username'].lower():
+            return
+        original = message.get('reply_to_message', {})
+        minutes = int(match[2]) * {'m': 1, 'h': 60, 'd': 1440}[match[3]] if match else 0
+        with self.receipts() as db:
+            row = db.execute('SELECT ack_key FROM receipts WHERE kind=? AND chat_id=? AND thread_id=? AND message_id=?',
+                             ('problem', str(message.get('chat', {}).get('id')), str(message.get('message_thread_id') or ''),
+                              original.get('message_id'))).fetchone()
+        if (not row or not row[0] or not 1 <= minutes <= 43200 or message.get('sender_chat')
+                or message.get('external_reply') or message.get('chat', {}).get('id') != original.get('chat', {}).get('id')
+                or str(message.get('message_thread_id') or '') != str(original.get('message_thread_id') or '')):
+            result = ('Rispondi al PROBLEM originale dal tuo account con /snooze@' + current['bot']['username']
+                      + ' 45m (oppure 3h, 2d). Durata: da 1 minuto a 30 giorni.')
+        else:
+            result = self.callback({'id': 'msg-' + str(message['chat']['id']) + '-' + str(message['message_id']),
+                                    'data': 'snz:' + row[0] + ':' + str(minutes), 'from': message.get('from', {}),
+                                    'message': original, '_command': True}, token)
+        # Command feedback is explicit user interaction, never an incident reminder.
+        params = {'chat_id': message['chat']['id'], 'text': result,
+                  'reply_parameters': {'message_id': message['message_id']}}
+        if message.get('message_thread_id'):
+            params['message_thread_id'] = message['message_thread_id']
+        self.api(token, 'sendMessage', params)
+
+    def expire_snoozes(self):
+        with self.operations:
+            with self.lock:
+                current = copy.deepcopy(self.state)
+            now = int(time.time())
+            with self.receipts() as db:
+                db.row_factory = sqlite3.Row
+                due = db.execute("SELECT * FROM snoozes WHERE status='active' AND until_at<=? AND next_check<=? LIMIT 8",
+                                 (now, now)).fetchall()
+            for snooze in due:
+                identity = (snooze['eventid'], snooze['chat_id'], snooze['thread_id'])
+                with self.receipts() as db:
+                    db.row_factory = sqlite3.Row
+                    original = db.execute('SELECT * FROM receipts WHERE id=?', ('problem:' + snooze['eventid'],)).fetchone()
+                status, detail, reminder_id = 'active', '', None
+                try:
+                    if (not original or original['bot_id'] != str(current.get('bot', {}).get('id'))
+                            or not current.get('routing', {}).get('ack_enabled')):
+                        status, detail = 'cancelled', 'Snooze terminato: bot, routing o messaggio originale non più disponibili.'
+                    else:
+                        event = self.ack_event(current.get('routing', {}), original)
+                        if str(event['r_eventid']) != '0':
+                            status, detail = 'resolved', 'Problema risolto in Zabbix: nessun promemoria inviato.'
+                        else:
+                            routing = current.get('routing', {})
+                            destination = self.resolve(self.host_groups(routing, original['hostid'], original['eventid']),
+                                                       routing['routes'], routing['choices'], original['hostid'])
+                            if not destination or self.destination_key(destination) != snooze['chat_id'] + ':' + snooze['thread_id']:
+                                status, detail = 'cancelled', 'Snooze terminato: destinazione non più autorizzata, nessun promemoria.'
+                            else:
+                                self.permissions(current['token'], int(snooze['chat_id']), current['bot']['id'], require_admin=True)
+                                if self.cooldown > time.time():
+                                    raise BridgeError('Limite Telegram: verifica del promemoria rinviata.')
+                                # Persist before sending: an interrupted response must never cause a second reminder.
+                                with self.receipts() as db:
+                                    db.execute("UPDATE snoozes SET status='sending',detail=? WHERE eventid=? AND chat_id=? AND thread_id=?",
+                                               ('Invio promemoria in corso; verificare Telegram in caso di interruzione.', *identity))
+                                params = {'chat_id': int(snooze['chat_id']),
+                                          'rich_message': self.event_message(json.loads(original['payload']), reminder=True,
+                                              ack_label='Zabbix' if str(event['acknowledged']) == '1' else ''),
+                                          'reply_parameters': {'message_id': original['message_id']}}
+                                if snooze['thread_id']:
+                                    params['message_thread_id'] = int(snooze['thread_id'])
+                                status = 'unconfirmed'
+                                message = self.api(current['token'], 'sendRichMessage', params)
+                                if not isinstance(message, dict) or not message.get('message_id') or not message.get('rich_message'):
+                                    raise BridgeError('Telegram non ha confermato il promemoria.')
+                                status, reminder_id = 'sent', message['message_id']
+                                detail = 'Snooze terminato: un promemoria confermato. Usa il messaggio originale per le operazioni.'
+                except BridgeError as error:
+                    detail = ('Invio promemoria non confermato; nessun reinvio automatico. ' if status == 'unconfirmed'
+                              else 'Verifica scadenza rinviata; nessun promemoria inviato. ') + str(error)
+                with self.receipts() as db:
+                    db.execute('UPDATE snoozes SET status=?,detail=?,reminder_id=?,next_check=? '
+                               'WHERE eventid=? AND chat_id=? AND thread_id=?',
+                               (status, detail, reminder_id, now + 60, *identity))
+                    db.execute('UPDATE audit SET status=?,detail=?,updated_at=? WHERE callback_id=?',
+                               (status, detail, now, snooze['callback_id']))
+                if status == 'sent':
+                    try:
+                        self.edit_incident(current['token'], original, event)
+                    except BridgeError as error:
+                        self.audit_result(snooze['callback_id'], 'telegram_failed', detail + ' Originale non aggiornato. ' + str(error))
 
     def recover(self, data, current):
         receipt_id = 'recovery:' + str(data['eventid'])
@@ -516,6 +717,11 @@ class Bridge:
                         original['thread_id'], original['message_id'], 'editing', 'Aggiornamento del PROBLEM in corso.',
                         int(time.time()), original['hostid'], original['bot_id'], str(data['recovery_eventid'])))
         event = json.loads(original['payload'])
+        snooze = self.snooze_row(original)
+        silenced = bool(snooze and snooze['status'] == 'active' and snooze['until_at'] > time.time())
+        with self.receipts() as db:
+            db.execute("UPDATE snoozes SET status='resolved',detail=? WHERE eventid=? AND chat_id=? AND thread_id=? AND status='active'",
+                       ('Problema risolto: nessun promemoria previsto.', original['eventid'], original['chat_id'], original['thread_id']))
         params = {'chat_id': int(original['chat_id']), 'message_id': original['message_id'],
                   'rich_message': self.event_message(event, data)}
         if original['ack_key']:
@@ -527,7 +733,7 @@ class Bridge:
             if not isinstance(message, dict) or message.get('message_id') != original['message_id'] or not message.get('rich_message'):
                 raise BridgeError('Telegram non ha confermato la modifica del messaggio originale.')
             edited = True
-            if int(event['severity']) in (4, 5):
+            if int(event['severity']) in (4, 5) and not silenced:
                 with self.receipts() as db:
                     db.execute('UPDATE receipts SET status=?,detail=?,updated_at=? WHERE id=?',
                                ('sending', 'Originale aggiornato; invio del messaggio di ripristino in corso.', int(time.time()), receipt_id))
@@ -584,9 +790,13 @@ class Bridge:
                 audit = [dict(row) for row in db.execute(
                     'SELECT operation,eventid,telegram_userid,actor,chat_id,thread_id,message_id,created_at,updated_at,status,detail '
                     'FROM audit ORDER BY updated_at DESC,rowid DESC LIMIT 8')]
+                snoozes = [dict(row) for row in db.execute(
+                    'SELECT eventid,chat_id,thread_id,actor,until_at,status,reminder_id,detail '
+                    "FROM snoozes ORDER BY (status='active') DESC,until_at DESC LIMIT 8")]
             return copy.deepcopy({
                 'notifications': receipts,
                 'audit': audit,
+                'snoozes': snoozes,
                 'ack_enabled': self.state.get('routing', {}).get('ack_enabled', False),
                 'bot': self.state.get('bot'),
                 'verified_at': self.state.get('verified_at'),
@@ -767,11 +977,13 @@ class Bridge:
                 self.stop.wait(1)
                 continue
             try:
+                self.expire_snoozes()
                 updates = self.api(token, 'getUpdates', {'offset': offset, 'timeout': 25,
                                                         'allowed_updates': ['message', 'callback_query']})
                 for update in updates:
                     if 'message' in update:
                         self.register_message(update['message'], token)
+                        self.snooze_command(update['message'], token)
                     if 'callback_query' in update:
                         self.callback(update['callback_query'], token)
                     with self.lock:

@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -38,7 +39,7 @@ class TelegramFlowTest(unittest.TestCase):
             if params['user_id'] != 123456 and self.actor_status is not None:
                 return {'status': self.actor_status}
             return {'status': self.member_status}
-        if method == 'answerCallbackQuery':
+        if method in ('answerCallbackQuery', 'sendMessage'):
             return True
         if method == 'editMessageText' and self.deleted:
             raise BridgeError('Telegram 400: message to edit not found')
@@ -482,7 +483,8 @@ class TelegramFlowTest(unittest.TestCase):
         self.assertIn('Chat -1001; topic 17', comment)
         edit = next(params for method, params in self.calls if method == 'editMessageText')
         self.assertEqual(edit['message_id'], 42)
-        self.assertEqual(edit['reply_markup'], {'inline_keyboard': []})
+        self.assertTrue(all(button['callback_data'].startswith('snz:')
+                            for row in edit['reply_markup']['inline_keyboard'] for button in row))
         self.assertIn('Riconosciuto in Zabbix', edit['rich_message']['html'])
         self.assertIn('Mario &lt;&amp;&gt;', edit['rich_message']['html'])
         self.bridge = Bridge(self.path)
@@ -596,6 +598,162 @@ class TelegramFlowTest(unittest.TestCase):
             self.bridge.poll()
         self.assertEqual(Bridge(self.path).state['offset'], 43)
         self.assertEqual(self.native_event['acknowledged'], '1')
+
+    def snooze_query(self, duration='30', **changes):
+        return self.ack_query(**dict({'data': 'snz:' + self.ack_data[4:] + ':' + duration}, **changes))
+
+    def make_snooze_due(self):
+        with self.bridge.receipts() as db:
+            db.execute('UPDATE snoozes SET until_at=?,next_check=0', (int(time.time()) - 1,))
+
+    def test_snooze_durations_are_shared_persisted_and_callback_replay_cannot_extend_them(self):
+        self.ack_fixture()
+        labels = {'30': '30 minuti', '120': '2 ore', '480': '8 ore', '1440': '1 giorno'}
+        for duration in ('30', '120', '480', '1440'):
+            self.bridge.callback(self.snooze_query(duration, id=duration), self.token)
+            self.assertIn('Snooze di ' + labels[duration], self.calls[-1][1]['text'])
+            edit = next(params for method, params in reversed(self.calls) if method == 'editMessageText')
+            self.assertIn('Snooze di ' + labels[duration], edit['rich_message']['html'])
+            row = self.bridge.status()['snoozes'][0]
+            self.assertAlmostEqual(row['until_at'], int(time.time()) + int(duration) * 60, delta=2)
+            self.assertEqual(row['status'], 'active')
+            self.assertIn('Telegram ID 99', row['actor'])
+        self.bridge = Bridge(self.path)
+        before = self.bridge.status()['snoozes'][0]['until_at']
+        with patch('bridge.server.time.time', return_value=time.time() + 100):
+            self.bridge.callback(self.snooze_query('1440', id='1440'), self.token)
+        self.assertEqual(self.bridge.status()['snoozes'][0]['until_at'], before)
+        self.bridge.callback(self.snooze_query('30', id='other-member', **{'from': {'id': 100, 'first_name': 'Luca'}}), self.token)
+        self.assertEqual(len(self.bridge.status()['snoozes']), 1)
+        self.assertIn('Luca', self.bridge.status()['snoozes'][0]['actor'])
+        edit = next(params for method, params in reversed(self.calls) if method == 'editMessageText')
+        self.assertIn('Sospeso in questa destinazione', edit['rich_message']['html'])
+        self.assertIn('UTC', edit['rich_message']['html'])
+        self.assertFalse(any(method == 'event.acknowledge' for method, _ in self.zabbix_calls))
+        self.assertNotIn(self.ack_data[4:], json.dumps(self.bridge.status()))
+
+    def test_snooze_expiry_rechecks_zabbix_and_sends_only_one_reminder_after_restart(self):
+        self.ack_fixture()
+        self.bridge.callback(self.snooze_query(), self.token)
+        self.make_snooze_due()
+        before = len(self.calls)
+        self.bridge = Bridge(self.path)
+        self.bridge.expire_snoozes()
+        self.bridge = Bridge(self.path)
+        self.bridge.expire_snoozes()
+        sends = [params for method, params in self.calls[before:] if method == 'sendRichMessage']
+        self.assertEqual(len(sends), 1)
+        self.assertEqual(sends[0]['chat_id'], -1001)
+        self.assertEqual(sends[0]['message_thread_id'], 17)
+        self.assertEqual(sends[0]['reply_parameters'], {'message_id': 42})
+        self.assertIn('PROMEMORIA', sends[0]['rich_message']['html'])
+        self.assertEqual(self.bridge.status()['snoozes'][0]['status'], 'sent')
+
+    def test_snooze_resolved_at_expiry_or_recovery_while_suspended_sends_no_new_message(self):
+        self.ack_fixture()
+        self.bridge.callback(self.snooze_query(), self.token)
+        before = len(self.calls)
+        self.bridge.notify(self.recovery())
+        self.assertEqual([method for method, _ in self.calls[before:]], ['editMessageText'])
+        self.assertIn('RISOLTO', self.calls[-1][1]['rich_message']['html'])
+        self.assertEqual(self.bridge.status()['snoozes'][0]['status'], 'resolved')
+        self.bridge.expire_snoozes()
+        self.assertTrue(self.bridge.notify(self.recovery())['duplicate'])
+        # Zabbix is authoritative even when a RECOVERY webhook was not received.
+        with self.bridge.receipts() as db:
+            db.execute("UPDATE snoozes SET status='active',until_at=0,next_check=0")
+        self.native_event['r_eventid'] = '100'
+        before = len(self.calls)
+        self.bridge.expire_snoozes()
+        self.assertEqual(len(self.calls), before)
+        self.assertEqual(self.bridge.status()['snoozes'][0]['status'], 'resolved')
+
+    def test_snooze_api_failure_waits_but_uncertain_send_never_repeats(self):
+        self.ack_fixture()
+        self.bridge.callback(self.snooze_query(), self.token)
+        self.make_snooze_due()
+        with patch.object(self.bridge, 'zabbix_api', side_effect=BridgeError('Zabbix non raggiungibile')):
+            self.bridge.expire_snoozes()
+        self.assertEqual(self.bridge.status()['snoozes'][0]['status'], 'active')
+        self.assertIn('rinviata', self.bridge.status()['snoozes'][0]['detail'])
+        self.make_snooze_due()
+        original = self.bridge.api
+        def fail_send(token, method, params=None):
+            if method == 'sendRichMessage':
+                raise BridgeError('Risposta interrotta')
+            return original(token, method, params)
+        with patch.object(self.bridge, 'api', side_effect=fail_send):
+            self.bridge.expire_snoozes()
+        self.bridge = Bridge(self.path)
+        with patch.object(self.bridge, 'api') as api:
+            self.bridge.expire_snoozes()
+            api.assert_not_called()
+        self.assertEqual(self.bridge.status()['snoozes'][0]['status'], 'unconfirmed')
+        with self.bridge.receipts() as db:
+            db.execute("UPDATE snoozes SET status='sending'")
+        self.assertEqual(Bridge(self.path).status()['snoozes'][0]['status'], 'unconfirmed')
+
+    def test_snooze_rejects_nonmember_forged_topic_and_removed_route(self):
+        self.ack_fixture()
+        self.actor_status = 'left'
+        self.bridge.callback(self.snooze_query(), self.token)
+        self.actor_status = 'member'
+        message = dict(self.ack_query()['message'], message_thread_id=18)
+        self.bridge.callback(self.snooze_query(id='wrong-topic', message=message), self.token)
+        self.assertEqual(self.bridge.status()['snoozes'], [])
+        self.bridge.callback(self.snooze_query(id='valid'), self.token)
+        self.make_snooze_due()
+        self.bridge.state['routing']['routes'] = []
+        before = len(self.calls)
+        self.bridge.expire_snoozes()
+        self.assertFalse(any(method == 'sendRichMessage' for method, _ in self.calls[before:]))
+        self.assertEqual(self.bridge.status()['snoozes'][0]['status'], 'cancelled')
+
+    def test_snooze_and_ack_preserve_each_other_and_edit_failure_keeps_deadline(self):
+        self.ack_fixture()
+        self.deleted = True
+        self.bridge.callback(self.snooze_query(), self.token)
+        self.assertEqual(self.bridge.status()['snoozes'][0]['status'], 'active')
+        self.assertEqual(self.bridge.status()['audit'][0]['status'], 'telegram_failed')
+        self.deleted = False
+        self.bridge.callback(self.ack_query(id='ack-after-snooze'), self.token)
+        edit = next(params for method, params in reversed(self.calls) if method == 'editMessageText')
+        self.assertIn('Riconosciuto in Zabbix', edit['rich_message']['html'])
+        self.assertIn('Sospeso in questa destinazione', edit['rich_message']['html'])
+        self.assertIn('Sospendi 30 min', str(edit['reply_markup']))
+        self.bridge.callback(self.snooze_query(id='snooze-after-ack'), self.token)
+        edit = next(params for method, params in reversed(self.calls) if method == 'editMessageText')
+        self.assertIn('Mario &lt;&amp;&gt;', edit['rich_message']['html'])
+
+    def test_snooze_does_not_suppress_other_incidents_in_the_same_topic(self):
+        self.ack_fixture()
+        self.bridge.callback(self.snooze_query(), self.token)
+        before = len(self.calls)
+        self.bridge.notify(self.notification(eventid='101', routing_revision='v1'))
+        self.bridge.notify(self.recovery(eventid='101'))
+        self.assertEqual(sum(method == 'sendRichMessage' for method, _ in self.calls[before:]), 2)
+        self.assertEqual(self.bridge.status()['snoozes'][0]['eventid'], '99')
+        self.assertEqual(self.bridge.status()['snoozes'][0]['status'], 'active')
+
+    def test_custom_snooze_requires_reply_personal_identity_and_valid_duration(self):
+        self.ack_fixture()
+        self.bridge.callback(self.snooze_query('custom'), self.token)
+        self.assertIn('/snooze@TestBot', self.calls[-1][1]['text'])
+        self.assertEqual(self.bridge.status()['snoozes'], [])
+        message = {'message_id': 80, 'text': '/snooze@TestBot 1m', 'from': self.ack_query()['from'],
+                   'chat': {'id': -1001, 'type': 'supergroup'}, 'message_thread_id': 17,
+                   'reply_to_message': self.ack_query()['message']}
+        for changes in ({'text': '/snooze@TestBot 0m'}, {'text': '/snooze@TestBot 31d'},
+                        {'sender_chat': {'id': -1001}}, {'message_thread_id': 18}, {'reply_to_message': {}}):
+            self.bridge.snooze_command(dict(message, **changes), self.token)
+            self.assertEqual(self.bridge.status()['snoozes'], [])
+        self.bridge.snooze_command(message, self.token)
+        self.assertIn('Snooze di 1 minuto', self.calls[-1][1]['text'])
+        deadline = self.bridge.status()['snoozes'][0]['until_at']
+        self.assertAlmostEqual(deadline, time.time() + 60, delta=2)
+        self.bridge = Bridge(self.path)
+        self.bridge.snooze_command(message, self.token)
+        self.assertEqual(self.bridge.status()['snoozes'][0]['until_at'], deadline)
 
 
 if __name__ == '__main__':
