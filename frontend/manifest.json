@@ -24,5 +24,10 @@
       "class": "Destinations",
       "view": "zabbix.talk.destinations"
     }
+  },
+  "assets": {
+    "css": [
+      "talk.css"
+    ]
   }
 }

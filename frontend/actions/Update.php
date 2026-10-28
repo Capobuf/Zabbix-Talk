@@ -4,6 +4,7 @@ namespace Modules\ZabbixTalk\Actions;
 
 use CController;
 use CControllerResponseRedirect;
+use CCsrfTokenHelper;
 use CMessageHelper;
 use CUrl;
 use CWebUser;
@@ -16,17 +17,27 @@ class Update extends CController {
     protected function checkInput(): bool {
         $valid = $this->validateInput([
             'operation' => 'required|in connect,verify,register,send,edit,select,create_topic',
-            'token' => 'string', 'destination_key' => 'string', 'topic_name' => 'string'
+            'section' => 'in destinations,settings,tests', 'token' => 'string', 'destination_key' => 'string', 'topic_name' => 'string'
         ]);
         $token = $this->getInput('token', '');
         if (!$valid || strlen($token) > 256) {
             CMessageHelper::setErrorTitle(_('Richiesta Zabbix Talk non valida.'));
-            $this->setResponse(new CControllerResponseRedirect(
-                (new CUrl('zabbix.php'))->setArgument('action', 'zabbix.talk.overview')
-            ));
+            $this->setResponse($this->returnResponse());
             return false;
         }
         return true;
+    }
+
+    private function returnResponse(): CControllerResponseRedirect {
+        $section = $this->getInput('section', 'settings');
+        $response = new CControllerResponseRedirect((new CUrl('zabbix.php'))->setArgument('action',
+            $section === 'destinations' ? 'zabbix.talk.destinations' : 'zabbix.talk.overview')
+            ->setArgument('section', $section));
+        if ($section === 'destinations') {
+            // Native redirects relay feedback with a signed POST to the destination controller.
+            $response->setFormData([CSRF_TOKEN_NAME => CCsrfTokenHelper::get('zabbix.talk.destinations')]);
+        }
+        return $response;
     }
 
     protected function checkPermissions(): bool {
@@ -50,8 +61,6 @@ class Update extends CController {
             CMessageHelper::setErrorTitle(_('Operazione Zabbix Talk non riuscita.'));
             error($error->getMessage());
         }
-        $this->setResponse(new CControllerResponseRedirect(
-            (new CUrl('zabbix.php'))->setArgument('action', 'zabbix.talk.overview')
-        ));
+        $this->setResponse($this->returnResponse());
     }
 }

@@ -4,6 +4,7 @@ namespace Modules\ZabbixTalk\Actions;
 
 use CController;
 use CControllerResponseRedirect;
+use CCsrfTokenHelper;
 use CMessageHelper;
 use CUrl;
 use CWebUser;
@@ -16,13 +17,23 @@ class Configure extends CController {
     protected function checkInput(): bool {
         if (!$this->validateInput([
             'operation' => 'required|in provision,transport,prepare_test,problem_test,recovery_test,remove_test',
-            'groupid' => 'db hstgrp.groupid', 'severities' => 'array', 'confirm' => 'in 1'
+            'groupid' => 'db hstgrp.groupid', 'severities' => 'array', 'confirm' => 'in 1', 'section' => 'in notifications,tests'
         ])) {
-            $this->setResponse(new CControllerResponseRedirect(
-                (new CUrl('zabbix.php'))->setArgument('action', 'zabbix.talk.overview')));
+            $this->setResponse($this->returnResponse());
             return false;
         }
         return true;
+    }
+
+    private function returnResponse(): CControllerResponseRedirect {
+        $section = $this->getInput('section', $this->getInput('operation', '') === 'provision' ? 'notifications' : 'tests');
+        $response = new CControllerResponseRedirect((new CUrl('zabbix.php'))->setArgument('action',
+            $section === 'notifications' ? 'zabbix.talk.destinations' : 'zabbix.talk.overview')
+            ->setArgument('section', $section));
+        if ($section === 'notifications') {
+            $response->setFormData([CSRF_TOKEN_NAME => CCsrfTokenHelper::get('zabbix.talk.destinations')]);
+        }
+        return $response;
     }
 
     protected function checkPermissions(): bool {
@@ -60,7 +71,6 @@ class Configure extends CController {
             CMessageHelper::setErrorTitle(_('Configurazione o test non riuscito.'));
             error($error->getMessage());
         }
-        $this->setResponse(new CControllerResponseRedirect(
-            (new CUrl('zabbix.php'))->setArgument('action', 'zabbix.talk.overview')));
+        $this->setResponse($this->returnResponse());
     }
 }

@@ -123,7 +123,16 @@ class Notifications {
             $message .= !empty($telegram['ack_enabled']) ? _(' ACK da Telegram abilitati.')
                 : _(' Salva nuovamente le destinazioni per abilitare gli ACK da Telegram.');
         }
-        return ['config' => array_diff_key($config, ['observed' => true]),
+        $resource_states = [];
+        foreach ($resources as $key => $resource) {
+            $resource_states[$key] = $resource === null ? _('Mancante')
+                : (in_array($key, $changed) ? _('Modificata esternamente') : _('Sincronizzata'));
+        }
+        if ($resources['action'] !== null && !in_array('action', $changed)) {
+            $resource_states['action'] = $resources['action']['status'] == ACTION_STATUS_ENABLED
+                ? _('Attiva') : _('Disabilitata');
+        }
+        return ['config' => array_diff_key($config, ['observed' => true]), 'resources' => $resource_states,
             'ready' => $same_telegram && !$changed && $enabled, 'message' => $message];
     }
 
