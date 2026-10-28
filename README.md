@@ -12,6 +12,22 @@ Le slice #1–#5 e lo stile Telegram #16 sono integrate. La slice [#6](https://g
 - [Regole di lavoro per l'agent](AGENTS.md)
 - [Skill UI/UX per frontend Zabbix](.agents/skills/zabbix-frontend-ux/SKILL.md)
 
+## Navigazione frontend
+
+Il modulo usa una navigazione orizzontale nativa, senza nuove dipendenze:
+
+- **Panoramica**: stato essenziale di bridge, bot, destinazioni, conflitti e notifiche, con collegamenti alle configurazioni.
+- **Destinazioni**: tabella delle destinazioni registrate, collegamento tramite comando Telegram, creazione esplicita di topic, associazioni dei gruppi host e scelte per i conflitti. I gruppi non associati e l’anteprima degli altri host sono espandibili.
+- **Notifiche**: severità, politica corrente 24/7 e stato reale delle risorse gestite. Gli identificativi tecnici sono espandibili.
+- **Impostazioni**: token del bot, verifica della connessione e diagnostica del bridge.
+- **Collaudi**: destinazione selezionata e prove distinte Telegram, Webhook ed evento PROBLEM/RECOVERY; eventi, ricevute e audit sono nei dettagli avanzati.
+
+Destinazioni e Notifiche condividono un unico form: il passaggio tra queste due sezioni conserva le modifiche locali. **Salva destinazioni e notifiche** invia sempre associazioni, scelte per host e severità, con la stessa conferma e lo stesso provisioning precedenti. Per uscire con modifiche non salvate viene mostrato l’avviso del browser. Anteprima e salvataggio conservano anche la sezione nell’URL; le altre operazioni ritornano alla sezione di origine con il feedback nativo. I ritorni firmati di Zabbix conservano CSRF e non vengono interpretati come salvataggi vuoti.
+
+Percorsi relativi al frontend `/zabbix/`: `zabbix.php?action=zabbix.talk.overview&section=overview`, `zabbix.php?action=zabbix.talk.destinations&section=destinations`, `zabbix.php?action=zabbix.talk.destinations&section=notifications`, `zabbix.php?action=zabbix.talk.overview&section=settings`, `zabbix.php?action=zabbix.talk.overview&section=tests`. Le sezioni storiche sotto documentano le prove delle slice precedenti, con la navigazione dell’epoca.
+
+Anteprima approvata il 28 ottobre 2026. Verificati sul frontend reale il salvataggio da Notifiche senza perdita di associazioni, scelte per host, severità, ID delle risorse o host di prova; il mantenimento dei dati dopo anteprima ed errore per mancata conferma; l’aggiornamento dello stato senza perdere il token non inviato; i ritorni alla sezione corretta e il rifiuto dei POST senza CSRF. Le cinque schermate sono state controllate a 1366 px con tema chiaro e a 1024 px con il foglio di stile scuro nativo, senza scorrimento orizzontale della pagina. Nessun nuovo messaggio Telegram o evento di prova generato durante questa rifinitura.
+
 ## Struttura
 
 - `frontend/`: modulo PHP nativo del frontend Zabbix.

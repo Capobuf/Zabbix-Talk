@@ -21,7 +21,7 @@ class Destinations extends CController {
 
     protected function checkInput(): bool {
         return $this->validateInput(['operation' => 'in preview,save', 'mapping' => 'array',
-            'choices' => 'array', 'severities' => 'array', 'confirm' => 'in 1']);
+            'choices' => 'array', 'severities' => 'array', 'confirm' => 'in 1', 'section' => 'in destinations,notifications']);
     }
 
     protected function checkPermissions(): bool {
@@ -29,11 +29,15 @@ class Destinations extends CController {
     }
 
     protected function doAction(): void {
-        $data = ['error' => '', 'message' => '', 'hosts' => [], 'groups' => [], 'destinations' => [],
+        $data = ['section' => $this->getInput('section', 'destinations'), 'telegram' => [],
+            'notifications' => ['config' => [], 'ready' => false, 'message' => _('Stato delle risorse non disponibile.')],
+            'error' => '', 'message' => '', 'hosts' => [], 'groups' => [], 'destinations' => [],
             'mapping' => [], 'choices' => [], 'severities' => [2, 3, 4, 5]];
         try {
             $notifications = new Notifications();
             $state = BridgeClient::request('/status');
+            $data['telegram'] = $state;
+            $data['notifications'] = $notifications->status($state);
             $data['destinations'] = $state['destinations'] ?? [];
             $data['groups'] = API::HostGroup()->get(['output' => ['groupid', 'name'], 'sortfield' => 'name']);
             $groups = array_column($data['groups'], null, 'groupid');
@@ -44,7 +48,7 @@ class Destinations extends CController {
                 $destination = $route['destination'];
                 $data['mapping'][$route['groupid']] = $destination['chat_id'].':'.($destination['message_thread_id'] ?? '');
             }
-            if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
+            if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && $this->hasInput('operation')) {
                 $data['mapping'] = $this->getInput('mapping', []);
                 $data['choices'] = $this->getInput('choices', []);
                 $data['severities'] = $this->getInput('severities', []);
@@ -68,6 +72,7 @@ class Destinations extends CController {
             if ($this->getInput('operation', '') === 'save' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
                 $data['message'] = $notifications->provision($routes[0]['groupid'] ?? '', $data['severities'],
                     $this->hasInput('confirm'), $routes, $data['choices']);
+                $data['notifications'] = $notifications->status();
             }
         }
         catch (Throwable $error) { $data['error'] = $error->getMessage(); }

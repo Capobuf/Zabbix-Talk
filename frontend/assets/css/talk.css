@@ -1,0 +1,24 @@
+.wrapper:has(> main > .talk-ui) > main,
+.wrapper:has(> main > .talk-ui) > header,
+.wrapper:has(> main > .talk-ui) > footer { min-width: 0; }
+.talk-ui .talk-navigation { margin-bottom: 16px; }
+.talk-ui .talk-navigation ul { height: auto; display: flex; flex-wrap: wrap; }
+.talk-ui .talk-navigation a { display: inline-block; }
+.talk-ui .talk-navigation li:last-child { margin-left: 24px; }
+.talk-ui .section-body > .form-grid,
+.talk-ui .section-body > form,
+.talk-ui .section-body > .talk-help,
+.talk-ui .section-body > p { margin: 12px; }
+.talk-ui .talk-help { margin: 12px 0; }
+.talk-ui .talk-help summary { cursor: pointer; }
+.talk-ui .talk-help > div { margin-top: 10px; }
+.talk-ui .talk-help li { margin: 6px 0; }
+.talk-ui .talk-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.talk-ui .talk-table { overflow-x: auto; }
+.talk-ui .talk-table td { vertical-align: middle; }
+.talk-ui .talk-table z-select { max-width: 100%; }
+.talk-ui .talk-diagnostics { white-space: pre-line; overflow-wrap: anywhere; }
+.talk-ui .talk-feedback:empty { display: none; }
+.talk-ui .talk-feedback { margin: 12px 0; }
+.talk-ui [hidden] { display: none !important; }
+.talk-ui .talk-save { margin-top: 16px; }
