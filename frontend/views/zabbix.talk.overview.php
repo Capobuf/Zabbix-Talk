@@ -97,13 +97,15 @@ else {
             new CTag('li', true, _('Crea l’host isolato nel gruppo configurato. Usa la severità massima abilitata e può attivare altre Action applicabili al gruppo.')),
             new CTag('li', true, _('Attendi circa un minuto per la configurazione del server, poi genera il PROBLEM. Controlla Telegram e aggiorna lo stato: un valore accettato non conferma la consegna.')),
             new CTag('li', true, _('Per provare l’ACK premi Riconosci in Telegram dal tuo account membro del gruppo. Verifica evento e audit nei dettagli.')),
-            new CTag('li', true, _('Genera il RECOVERY: il messaggio originale deve diventare RISOLTO. Alta/Disastro aggiungono un messaggio; le severità 0–3 modificano soltanto l’originale.')),
+            new CTag('li', true, _('Per lo snooze scegli Sospendi nel PROBLEM Telegram. La sospensione vale per quell’incidente nella chat/topic, per tutti i membri. Per una durata personalizzata rispondi all’originale con /snooze@nomebot 1m (oppure 3h, 2d). Alla scadenza arriva un solo promemoria se Zabbix conferma il problema ancora aperto.')),
+            new CTag('li', true, _('Genera il RECOVERY: il messaggio originale deve diventare RISOLTO. Alta/Disastro aggiungono un messaggio salvo snooze attivo; le severità 0–3 modificano soltanto l’originale.')),
             new CTag('li', true, _('Aggiorna lo stato e confronta le ricevute nei dettagli. Rimuovi l’host solo dopo il RECOVERY: la rimozione elimina anche lo storico della prova.'))
         ])))));
     $body->addItem($help(_('Diagnostica avanzata · eventi, ricevute e audit'), new CFormGrid([
         new CLabel(_('Evento di prova')), new CFormField($text('problem_test')),
         new CLabel(_('Ricevute del bridge')), new CFormField((new CDiv($text('notification_receipts')))->addClass('talk-diagnostics')),
         new CLabel(_('Operazioni Telegram')), new CFormField((new CDiv($text('ack_audit')))->addClass('talk-diagnostics')),
+        new CLabel(_('Snooze per incidente e destinazione')), new CFormField((new CDiv($text('snoozes')))->addClass('talk-diagnostics')),
         new CLabel(_('Messaggio Telegram')), new CFormField((new CSpan($test ? 'message_id '.$test['message_id'] : '—'))->setId('talk-test-id'))
     ])));
 }

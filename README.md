@@ -2,7 +2,7 @@
 
 Zabbix Talk integra un modulo di configurazione nel frontend Zabbix e un bridge Telegram locale per notifiche e operazioni sugli incidenti.
 
-Le slice #1–#5 e lo stile Telegram #16 sono integrate. La slice [#6](https://github.com/Capobuf/Zabbix-Talk/issues/6) aggiunge l’ACK nativo dal messaggio Telegram. Il comportamento corrente è descritto in fondo; le sezioni delle slice precedenti documentano anche le rispettive prove storiche.
+Le slice #1–#7 e lo stile Telegram #16 sono integrate. La slice [#7](https://github.com/Capobuf/Zabbix-Talk/issues/7) aggiunge lo snooze condiviso del singolo incidente nella destinazione Telegram. Il comportamento corrente è descritto in fondo; le sezioni delle slice precedenti documentano anche le rispettive prove storiche.
 
 ## Riferimenti di progetto
 
@@ -88,7 +88,7 @@ git pull --ff-only
 sudo ./scripts/install.sh /usr/share/zabbix/ui super
 ```
 
-Il branch di sviluppo della slice #6 è `issue/6-telegram-ack`. Dopo il merge usa `main` per gli aggiornamenti. Non sovrascrivere modifiche locali. Per modifiche al solo Python basta `sudo systemctl restart zabbix-talk`; per PHP aggiorna la pagina. Quando cambiano unità systemd, socket o permessi, riesegui l’installer. La VM usa il codice del checkout, senza build, container o dipendenze Python esterne.
+Il branch di sviluppo della slice #7 è `issue/7-telegram-snooze`. Dopo il merge usa `main` per gli aggiornamenti. Non sovrascrivere modifiche locali. Per modifiche al solo Python basta `sudo systemctl restart zabbix-talk`; per PHP aggiorna la pagina. Quando cambiano unità systemd, socket o permessi, riesegui l’installer. La VM usa il codice del checkout, senza build, container o dipendenze Python esterne.
 
 ```bash
 systemctl status zabbix-talk --no-pager
@@ -327,3 +327,41 @@ L’operatore ha premuto il pulsante dal proprio account Telegram: callback real
 L’utente ha approvato l’anteprima il 28 ottobre 2026, autorizzando la pubblicazione e il merge. Al termine della revisione l’evento di collaudo è stato risolto tramite il pulsante della pagina: RECOVERY **9673**, modifica dello stesso messaggio **2** e nuovo ripristino **5**, entrambi confermati. Host di prova e audit rimangono disponibili, senza un PROBLEM di collaudo aperto.
 
 Riferimenti ufficiali: [event.acknowledge](https://www.zabbix.com/documentation/7.4/en/manual/api/reference/event/acknowledge), [getChatMember](https://core.telegram.org/bots/api#getchatmember), [CallbackQuery](https://core.telegram.org/bots/api#callbackquery), [answerCallbackQuery](https://core.telegram.org/bots/api#answercallbackquery).
+
+
+### Snooze per incidente e destinazione — slice #7
+
+Nei nuovi PROBLEM Telegram, **Sospendi 30 min / 2 ore / 8 ore / 24 ore** sospende quell’incidente nella sua chat/topic per tutti i membri. Durata scelta, scadenza e operatore sono mostrati nello stesso messaggio; un altro membro può scegliere una nuova durata, che sostituisce la precedente. ACK e snooze restano disponibili insieme: riconoscere l’evento non annulla la sospensione. I requisiti di bot amministratore, membership personale e routing corrente sono gli stessi dell’ACK; nessun nuovo ruolo o permesso API Zabbix.
+
+**Durata personalizzata** mostra le istruzioni Telegram: rispondi al **PROBLEM originale** dal tuo account con `/snooze@nomebot 45m`, `3h` oppure `2d`. Sono accettate durate intere da un minuto a 30 giorni, con unità `m`, `h`, `d`. Il comando riceve una risposta con durata e scadenza; anche la conferma dei pulsanti e il messaggio originale mostrano questi dati. La durata scelta è conservata dopo il riavvio. Un comando fuori contesto, anonimo o di un non membro non sospende l’incidente. Il fuso della scadenza Telegram è esplicito, **UTC**; il frontend mostra la stessa scadenza nel proprio fuso configurato.
+
+La sospensione non modifica Action, trigger, ACK o altri canali Zabbix. Non riguarda altri eventi, nemmeno sullo stesso host o topic. Un PROBLEM già consegnato resta deduplicato. Un RECOVERY ricevuto durante lo snooze aggiorna l’originale a **RISOLTO**, rimuove i pulsanti e sopprime il nuovo messaggio normalmente previsto per severità 4/5. Non viene inviato più tardi un ripristino arretrato.
+
+Alla scadenza il polling esistente legge lo stato effettivo via `event.get`: problema risolto → nessun promemoria; aperto e ancora autorizzato nella destinazione originale → un solo Rich Message **PROMEMORIA**, in risposta all’originale. Il promemoria fotografa lo stato verificato in quell’istante; le operazioni successive e il RECOVERY restano sul messaggio originale. Non sposta messaggi dopo un cambio di routing. Un conflitto o un errore API blocca l’invio; le verifiche fallite vengono riprovate dopo almeno 60 secondi. Non esiste un servizio scheduler separato né un controllo degli orari delle Action nel bridge. In condizioni normali il controllo avviene entro il successivo ciclo di long polling (circa 25 secondi, oltre al tempo delle API).
+
+La tabella `snoozes` nel database privato esistente conserva evento, chat/topic, operatore, scadenza, stato e ricevuta del promemoria. Le scadenze sopravvivono al riavvio; le callback riconsegnate non prolungano lo snooze. Prima di inviare è persistito lo stato in corso: se la risposta Telegram è ambigua o il processo si interrompe, il promemoria resta **non confermato**, senza reinvio automatico. Questo evita duplicazioni, ma non garantisce la consegna in caso di guasto: controlla Telegram e la diagnostica prima di richiedere un nuovo snooze.
+
+In **Zabbix Talk → Collaudi → Diagnostica avanzata · eventi, ricevute e audit**, **Snooze per incidente e destinazione** mostra le ultime otto sospensioni (attive per prime), scadenze ed esiti. **Aggiorna stato** aggiorna anche questi dati senza navigazione. Non è un secondo form di gestione dello snooze.
+
+Verifica mirata: `python3 -m unittest discover -s tests -q`. I 38 test del bridge comprendono durate rapide e personalizzate, membri diversi, callback duplicate, persistenza e scadenza dopo riavvio, problema già risolto, RECOVERY silenziato, routing rimosso, errore Zabbix, invio Telegram incerto e convivenza con ACK. Sono risposte API controllate, distinte dalla prova reale.
+
+Riferimenti ufficiali: [reply_to_message](https://core.telegram.org/bots/api#message), [pulsanti inline](https://core.telegram.org/bots/api#inlinekeyboardbutton), [event.get e stato di ripristino](https://www.zabbix.com/documentation/7.4/en/manual/api/reference/event/get).
+
+
+#### Anteprima della slice #7 sulla VM — 28 ottobre 2026
+
+Il servizio è stato riavviato con la nuova versione, health HTTP 200 e polling senza errori osservati. Dal frontend reale **Zabbix Talk → Collaudi** è stato generato il PROBLEM nativo **9733** sull’host isolato **10816**, trigger **34575**: Telegram ha confermato il Rich Message **6** nel supergruppo **test-bot**, senza topic. Non sono state modificate risorse Action, account tecnici o altri canali.
+
+La pagina reale è stata aperta via HTTPS, controllata a 1366 e 1024 px e aggiornata con **Aggiorna stato**, senza errori JavaScript osservati. Il nuovo campo snooze è stato verificato prima nello stato vuoto e poi con lo snooze reale attivo. Superati i 38 test del bridge e la verifica di sintassi dei due file PHP modificati.
+
+L’operatore **CeSa (@capobuf), Telegram ID 6763365**, ha premuto realmente **Sospendi 2 ore** sul messaggio **6**. Il polling ha salvato la sospensione fino alle **11:15:22 UTC**; un successivo riavvio del servizio ha conservato la stessa scadenza e lo stesso operatore, senza errori di polling osservati.
+
+La durata personalizzata e il promemoria per problema aperto a scadenza sono verificati con API controllate, non con un comando personale e una scadenza reale. La prova live usa un supergruppo senza topic; isolamento dei topic e membri ordinari sono coperti dai test controllati.
+
+Il branch della slice è `issue/7-telegram-snooze`. L’utente ha approvato l’anteprima con la durata esplicita il 28 ottobre 2026, autorizzando pubblicazione e merge.
+
+
+Correzione dell’anteprima: aggiunta la durata esplicita alla conferma Telegram e al PROBLEM originale, insieme alla scadenza. Verificati gli otto test mirati dello snooze, comprese le etichette delle quattro durate rapide e di un minuto personalizzato. Dopo il successivo snooze reale di otto ore dell’operatore, il messaggio **6** è stato aggiornato tramite Bot API con **Snooze di 8 ore · fino al 28/10/2026 18:16 UTC**, mantenendo invariata la scadenza salvata (**18:16:38 UTC**). Telegram ha confermato la modifica; nessun nuovo incidente o messaggio di prova creato per questa correzione.
+
+
+Al termine della revisione è stato generato il RECOVERY nativo **9936** dalla pagina **Collaudi**, mentre lo snooze di otto ore era ancora attivo: Telegram ha confermato la modifica dello stesso messaggio **6**, senza nuovo messaggio di ripristino (`recovery_message_id` assente). Lo snooze risulta **resolved**, senza promemoria previsto; il polling non mostra errori. Il PROBLEM di prova **9733** è risolto e l’host isolato rimane disponibile. Prima della pubblicazione sono stati confermati i 38 test del bridge e la sintassi dei due file PHP modificati.
