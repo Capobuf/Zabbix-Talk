@@ -24,9 +24,10 @@ SOCKET = '/run/zabbix-talk/control.sock'
 
 
 class BridgeError(Exception):
-    def __init__(self, message, retry_after=0):
+    def __init__(self, message, retry_after=0, uncertain=False):
         super().__init__(message)
         self.retry_after = retry_after
+        self.uncertain = uncertain
 
 
 def telegram(token, method, params=None):
@@ -82,9 +83,14 @@ class Bridge:
                        'status TEXT, detail TEXT, updated_at INTEGER)')
             columns = {row[1] for row in db.execute('PRAGMA table_info(receipts)')}
             for name, definition in [('hostid', 'TEXT'), ('bot_id', 'TEXT'), ('payload', 'TEXT'),
-                                     ('recovery_eventid', 'TEXT'), ('recovery_message_id', 'INTEGER')]:
+                                     ('recovery_eventid', 'TEXT'), ('recovery_message_id', 'INTEGER'), ('ack_key', 'TEXT')]:
                 if name not in columns:
                     db.execute(f'ALTER TABLE receipts ADD COLUMN {name} {definition}')
+            db.execute('CREATE UNIQUE INDEX IF NOT EXISTS receipt_ack_key ON receipts(ack_key)')
+            db.execute('CREATE TABLE IF NOT EXISTS audit ('
+                       'callback_id TEXT PRIMARY KEY, operation TEXT, eventid TEXT, telegram_userid TEXT, actor TEXT, '
+                       'chat_id TEXT, thread_id TEXT, message_id INTEGER, created_at INTEGER, updated_at INTEGER, '
+                       'status TEXT, detail TEXT, comment TEXT)')
 
     def receipts(self):
         return sqlite3.connect(self.receipts_path)
@@ -143,11 +149,28 @@ class Bridge:
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             with opener.open(request, timeout=3) as response:
                 result = json.load(response)
-            if not isinstance(result.get('result'), list):
+            if not isinstance(result, dict):
+                raise ValueError
+            if 'error' in result:
+                raise BridgeError('Zabbix ha rifiutato ' + method + '. Verifica i permessi del ruolo e l’accesso all’evento.')
+            expected = dict if method == 'event.acknowledge' else list
+            if not isinstance(result.get('result'), expected):
                 raise ValueError
             return result['result']
         except (OSError, ValueError, KeyError, TypeError):
-            raise BridgeError('Impossibile verificare le appartenenze attuali in Zabbix: nessun invio.') from None
+            raise BridgeError('API Zabbix non raggiungibile o risposta non valida: operazione non confermata.',
+                              uncertain=method == 'event.acknowledge') from None
+
+    def check_ack_permissions(self, destinations):
+        with self.operations:
+            with self.lock:
+                current = copy.deepcopy(self.state)
+                known = self.destinations()
+            if not isinstance(destinations, list) or any(not isinstance(key, str) or key not in known for key in destinations):
+                raise BridgeError('Destinazioni ACK non valide.')
+            for chat_id in {known[key]['chat_id'] for key in destinations}:
+                self.permissions(current['token'], chat_id, current['bot']['id'], require_admin=True)
+        return {'message': 'Permessi del bot per gli ACK verificati.'}
 
     def host_groups(self, routing, hostid, eventid):
         events = self.zabbix_api(routing, 'event.get', {'eventids': [eventid], 'output': ['eventid'],
@@ -178,6 +201,7 @@ class Bridge:
                 if self.destination_key(route['destination']) not in known:
                     raise BridgeError('Destinazione non registrata.')
             self.state['routing'] = {key: data[key] for key in ('routes', 'choices', 'api_token', 'api_url', 'revision')}
+            self.state['routing']['ack_enabled'] = data.get('ack_enabled') is True
             self.save()
         return {'message': 'Routing sincronizzato.'}
 
@@ -239,17 +263,20 @@ class Bridge:
             if (str(destination.get('chat_id', '')) != str(data['chat_id'])
                     or str(destination.get('message_thread_id') or '') != thread):
                 raise BridgeError('La destinazione è cambiata: salva nuovamente la configurazione notifiche.')
+            ack_key = secrets.token_hex(16) if kind == 'problem' and current.get('routing', {}).get('ack_enabled') else None
             with self.receipts() as db:
                 db.execute('INSERT INTO receipts '
-                           '(id,kind,eventid,host,chat_id,thread_id,status,detail,updated_at,hostid,bot_id,payload) '
-                           'VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                           '(id,kind,eventid,host,chat_id,thread_id,status,detail,updated_at,hostid,bot_id,payload,ack_key) '
+                           'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
                            (receipt_id, kind, str(data['eventid']), data['host'], str(data['chat_id']),
                             thread, 'sending', 'Invio in corso; in caso di interruzione verificare Telegram.', int(time.time()),
                             str(data['hostid']), str(data['bot_id']), json.dumps({
                                 key: data[key] for key in ('kind', 'eventid', 'hostid', 'host', 'problem', 'severity',
-                                                         'severity_name', 'occurred_at') if key in data})))
+                                                         'severity_name', 'occurred_at') if key in data}), ack_key))
             rich = self.event_message(data)
             params = {'chat_id': int(data['chat_id']), 'rich_message': rich}
+            if ack_key:
+                params['reply_markup'] = self.ack_keyboard(ack_key)
             if thread:
                 params['message_thread_id'] = int(thread)
             try:
@@ -279,7 +306,7 @@ class Bridge:
         return value
 
     @staticmethod
-    def event_message(data, recovery=None):
+    def event_message(data, recovery=None, ack_label=''):
         if data['kind'] == 'transport':
             return Bridge.test_message(transport=True)
         leds = ['⚪', '🔵', '🟡', '🟠', '🔴', '🔴']
@@ -292,6 +319,8 @@ class Bridge:
         if not recovery and data['kind'] == 'update':
             content += '<p><b>AGGIORNAMENTO</b></p>'
         content += '<blockquote><p>' + html.escape(data['problem']) + '</p></blockquote>'
+        if ack_label:
+            content += '<p><b>Riconosciuto in Zabbix</b>' + (' · ' + html.escape(ack_label) if ack_label != 'Zabbix' else '') + '</p>'
         started = Bridge.message_time(data['occurred_at'])
         if recovery:
             content += '<footer>' + html.escape(started) + ' → ' + html.escape(
@@ -314,6 +343,154 @@ class Bridge:
         if revision:
             content += f'<footer>Revisione | {revision}</footer>'
         return {'html': content, 'skip_entity_detection': True}
+
+    @staticmethod
+    def ack_keyboard(key=''):
+        return {'inline_keyboard': [[{'text': 'Riconosci', 'callback_data': 'ack:' + key}]] if key else []}
+
+    def audit_result(self, callback_id, status, detail):
+        with self.receipts() as db:
+            db.execute('UPDATE audit SET status=?,detail=?,updated_at=? WHERE callback_id=?',
+                       (status, detail, int(time.time()), callback_id))
+
+    def ack_event(self, routing, original):
+        events = self.zabbix_api(routing, 'event.get', {
+            'eventids': [original['eventid']], 'source': 0, 'object': 0, 'value': 1,
+            'output': ['eventid', 'acknowledged', 'r_eventid'], 'selectHosts': ['hostid'],
+            'selectAcknowledges': ['acknowledgeid', 'action', 'message']})
+        if (len(events) != 1 or str(events[0].get('eventid')) != original['eventid']
+                or [str(host['hostid']) for host in events[0].get('hosts', [])] != [original['hostid']]):
+            raise BridgeError('Evento non accessibile o non corrispondente al messaggio. Nessun ACK.')
+        event = events[0]
+        if str(event.get('acknowledged')) not in ('0', '1') or 'r_eventid' not in event:
+            raise BridgeError('Stato ACK Zabbix non verificabile.')
+        return event
+
+    def acknowledge(self, query, token, current, original, previous):
+        message = query.get('message', {})
+        sender = query.get('from', {})
+        routing = current.get('routing', {})
+        if (token != current.get('token') or not routing.get('ack_enabled') or not original
+                or original['kind'] != 'problem' or original['status'] != 'sent' or not original['payload']
+                or original['bot_id'] != str(current.get('bot', {}).get('id'))
+                or message.get('date', 0) == 0 or message.get('from', {}).get('id') != current['bot']['id']
+                or message.get('chat', {}).get('type') not in ('group', 'supergroup')
+                or str(message.get('chat', {}).get('id')) != original['chat_id']
+                or str(message.get('message_thread_id') or '') != original['thread_id']
+                or message.get('message_id') != original['message_id']
+                or query.get('inline_message_id') or sender.get('is_bot')
+                or not re.fullmatch(r'[1-9][0-9]{0,19}', str(sender.get('id', '')))):
+            raise BridgeError('Callback non autorizzata: usa il messaggio originale nel gruppo/topic associato.')
+        self.permissions(token, int(original['chat_id']), current['bot']['id'], require_admin=True)
+        member = self.api(token, 'getChatMember', {'chat_id': int(original['chat_id']), 'user_id': sender['id']})
+        if (member.get('status') not in ('creator', 'administrator', 'member')
+                and not (member.get('status') == 'restricted' and member.get('is_member') is True)):
+            raise BridgeError('Non sei un membro attuale del gruppo. Nessun ACK.')
+        groups = self.host_groups(routing, original['hostid'], original['eventid'])
+        destination = self.resolve(groups, routing['routes'], routing['choices'], original['hostid'])
+        if not destination or self.destination_key(destination) != original['chat_id'] + ':' + original['thread_id']:
+            raise BridgeError('Destinazione non più autorizzata per questo host. Nessun ACK.')
+        event = self.ack_event(routing, original)
+        if str(event['r_eventid']) != '0':
+            self.audit_result(query['id'], 'resolved', 'Problema già risolto in Zabbix; nessun ACK eseguito.')
+            return 'Problema già risolto in Zabbix. Nessun ACK eseguito.'
+        if str(event['acknowledged']) == '0':
+            with self.receipts() as db:
+                pending = db.execute("SELECT comment FROM audit WHERE eventid=? AND status IN ('submitting','uncertain')",
+                                     (original['eventid'],)).fetchall()
+            known_comments = {ack['message'] for ack in event.get('acknowledges', [])}
+            if previous or any(row[0] not in known_comments for row in pending):
+                raise BridgeError('ACK già tentato: esito non confermato o stato successivamente modificato. Verifica evento e audit; nessun reinvio automatico.')
+            actor = self.actor_name(sender)
+            comment = ('Zabbix Talk — ACK da Telegram: ' + actor + '. Chat ' + original['chat_id']
+                       + '; topic ' + (original['thread_id'] or 'Generale') + '. Operazione ' + query['id'] + '.')
+            with self.receipts() as db:
+                db.execute('UPDATE audit SET comment=? WHERE callback_id=?', (comment, query['id']))
+            self.audit_result(query['id'], 'submitting', 'Richiesta ACK nativa in corso; verificare Zabbix in caso di interruzione.')
+            try:
+                result = self.zabbix_api(routing, 'event.acknowledge', {
+                    'eventids': [original['eventid']], 'action': 6, 'message': comment})
+                if [str(eventid) for eventid in result.get('eventids', [])] != [original['eventid']]:
+                    raise BridgeError('Risultato ACK inatteso: verifica Zabbix prima di riprovare.', uncertain=True)
+            except BridgeError as error:
+                self.audit_result(query['id'], 'uncertain' if error.uncertain else 'failed', str(error))
+                raise
+            self.audit_result(query['id'], 'confirmed', 'Richiesta ACK confermata dall’API Zabbix; lettura dello stato corrente in corso.')
+            event = self.ack_event(routing, original)
+        acknowledged = str(event['acknowledged']) == '1'
+        if not acknowledged:
+            raise BridgeError('Zabbix non conferma lo stato riconosciuto. Verifica l’evento; nessun successo dichiarato.')
+        self.audit_result(query['id'], 'confirmed', 'ACK nativo verificato in Zabbix; aggiornamento Telegram in corso.')
+        if str(event['r_eventid']) != '0':
+            return 'ACK verificato in Zabbix. Il problema risulta ora risolto.'
+        label = 'Zabbix'
+        acknowledgements = sorted(event.get('acknowledges', []), key=lambda ack: int(ack['acknowledgeid']), reverse=True)
+        latest = next((ack for ack in acknowledgements if int(ack['action']) & 2), None)
+        if latest and latest['message']:
+            with self.receipts() as db:
+                actor = db.execute('SELECT actor FROM audit WHERE eventid=? AND comment=?',
+                                   (original['eventid'], latest['message'])).fetchone()
+            if actor:
+                label = actor[0]
+        params = {'chat_id': int(original['chat_id']), 'message_id': original['message_id'],
+                  'rich_message': self.event_message(json.loads(original['payload']), ack_label=label),
+                  'reply_markup': self.ack_keyboard()}
+        try:
+            message = self.api(token, 'editMessageText', params)
+            if not isinstance(message, dict) or message.get('message_id') != original['message_id'] or not message.get('rich_message'):
+                raise BridgeError('Telegram non ha confermato la modifica.')
+        except BridgeError as error:
+            if 'message is not modified' not in str(error):
+                self.audit_result(query['id'], 'telegram_failed', 'ACK verificato in Zabbix; messaggio non aggiornato. ' + str(error))
+                return 'ACK verificato in Zabbix; messaggio Telegram non aggiornato. Consulta l’audit.'
+        self.audit_result(query['id'], 'confirmed', 'ACK verificato in Zabbix e messaggio Telegram aggiornato.')
+        return 'Evento riconosciuto in Zabbix. Messaggio aggiornato.'
+
+    @staticmethod
+    def actor_name(sender):
+        name = ' '.join(str(sender.get(key, '')) for key in ('first_name', 'last_name')).strip()
+        if sender.get('username'):
+            name += ' (@' + str(sender['username']) + ')'
+        name = re.sub(r'[\x00-\x1f\x7f\u202a-\u202e\u2066-\u2069]', '', name)[:180].strip()
+        return (name + ' ' if name else '') + '(Telegram ID ' + str(sender.get('id', 'sconosciuto'))[:20] + ')'
+
+    def callback(self, query, token):
+        with self.operations:
+            with self.lock:
+                current = copy.deepcopy(self.state)
+            if token != current.get('token'):
+                return
+            callback_id = query.get('id', '')
+            if not isinstance(callback_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', callback_id):
+                return
+            sender = query.get('from', {})
+            message = query.get('message', {})
+            key = query.get('data', '')
+            with self.receipts() as db:
+                db.row_factory = sqlite3.Row
+                original = db.execute('SELECT * FROM receipts WHERE ack_key=?',
+                                     (key[4:] if isinstance(key, str) and re.fullmatch(r'ack:[a-f0-9]{32}', key) else '',)).fetchone()
+                previous = db.execute('SELECT status FROM audit WHERE callback_id=?', (callback_id,)).fetchone()
+                db.execute('INSERT OR IGNORE INTO audit VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                           (callback_id, 'ACK', original['eventid'] if original else '', str(sender.get('id', ''))[:20],
+                            self.actor_name(sender), str(message.get('chat', {}).get('id', ''))[:24],
+                            str(message.get('message_thread_id') or '')[:20], message.get('message_id'),
+                            int(time.time()), int(time.time()), 'checking', 'Verifica autorizzazione in corso.', ''))
+            try:
+                result = self.acknowledge(query, token, current, original, previous)
+            except BridgeError as error:
+                with self.receipts() as db:
+                    status = db.execute('SELECT status FROM audit WHERE callback_id=?', (callback_id,)).fetchone()[0]
+                if status == 'checking' and not previous:
+                    self.audit_result(callback_id, 'denied', str(error))
+                elif status == 'confirmed' and not previous:
+                    self.audit_result(callback_id, 'uncertain', 'Richiesta ACK confermata; stato corrente non verificato. ' + str(error))
+                result = str(error)
+            try:
+                self.api(token, 'answerCallbackQuery', {'callback_query_id': callback_id, 'text': result[:200], 'show_alert': True})
+            except BridgeError:
+                # Callback answers expire; the persisted audit remains available in the frontend.
+                pass
 
     def recover(self, data, current):
         receipt_id = 'recovery:' + str(data['eventid'])
@@ -341,6 +518,8 @@ class Bridge:
         event = json.loads(original['payload'])
         params = {'chat_id': int(original['chat_id']), 'message_id': original['message_id'],
                   'rich_message': self.event_message(event, data)}
+        if original['ack_key']:
+            params['reply_markup'] = self.ack_keyboard()
         edited = False
         recovery_message_id = None
         try:
@@ -402,8 +581,13 @@ class Bridge:
                 receipts = [dict(row) for row in db.execute(
                     'SELECT kind,eventid,host,chat_id,thread_id,message_id,status,detail,updated_at,recovery_eventid,recovery_message_id '
                     'FROM receipts ORDER BY updated_at DESC, rowid DESC LIMIT 8')]
+                audit = [dict(row) for row in db.execute(
+                    'SELECT operation,eventid,telegram_userid,actor,chat_id,thread_id,message_id,created_at,updated_at,status,detail '
+                    'FROM audit ORDER BY updated_at DESC,rowid DESC LIMIT 8')]
             return copy.deepcopy({
                 'notifications': receipts,
+                'audit': audit,
+                'ack_enabled': self.state.get('routing', {}).get('ack_enabled', False),
                 'bot': self.state.get('bot'),
                 'verified_at': self.state.get('verified_at'),
                 'polling': self.last_poll > time.time() - 80 and not self.poll_error,
@@ -417,7 +601,7 @@ class Bridge:
                 'retry_after': max(0, int(self.cooldown - time.time()) + 1)
             })
 
-    def permissions(self, token, chat_id, bot_id):
+    def permissions(self, token, chat_id, bot_id, require_admin=False):
         chat = self.api(token, 'getChat', {'chat_id': chat_id})
         if chat.get('type') not in ('group', 'supergroup'):
             raise BridgeError('Scegli un gruppo o supergruppo Telegram, non una chat privata o un canale.')
@@ -425,6 +609,8 @@ class Bridge:
         status = member.get('status')
         if status in ('creator', 'administrator'):
             return chat
+        if require_admin:
+            raise BridgeError('Per gli ACK il bot deve essere amministratore del gruppo: serve a verificare tutti i membri con getChatMember.')
         if status == 'restricted':
             allowed = member.get('is_member') and member.get('can_send_messages')
         else:
@@ -582,10 +768,12 @@ class Bridge:
                 continue
             try:
                 updates = self.api(token, 'getUpdates', {'offset': offset, 'timeout': 25,
-                                                        'allowed_updates': ['message']})
+                                                        'allowed_updates': ['message', 'callback_query']})
                 for update in updates:
                     if 'message' in update:
                         self.register_message(update['message'], token)
+                    if 'callback_query' in update:
+                        self.callback(update['callback_query'], token)
                     with self.lock:
                         if token != self.state.get('token'):
                             break
@@ -634,7 +822,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self.server.bridge.authorized(self.headers.get('Authorization', '')):
                 self.reply(401, {'error': 'Autenticazione locale non valida.'})
                 return
-        elif not control or self.path not in ('/action', '/channel', '/routing'):
+        elif not control or self.path not in ('/action', '/channel', '/routing', '/ack-permissions'):
             self.reply(404, {'error': 'Percorso non disponibile.'})
             return
         try:
@@ -648,6 +836,8 @@ class Handler(BaseHTTPRequestHandler):
                 result = self.server.bridge.notify(data)
             elif self.path == '/routing':
                 result = self.server.bridge.configure_routing(data)
+            elif self.path == '/ack-permissions':
+                result = self.server.bridge.check_ack_permissions(data.get('destinations'))
             elif self.path == '/channel':
                 result = self.server.bridge.channel()
             else:

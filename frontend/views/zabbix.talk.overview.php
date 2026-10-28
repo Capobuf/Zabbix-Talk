@@ -158,6 +158,7 @@ $checks = new CFormGrid([
             new CTag('li', true, _('Crea l’host di prova isolato nel gruppo configurato. Il test usa la severità massima abilitata.')),
             new CTag('li', true, _('Attendi circa un minuto per la configurazione del server, poi premi Genera PROBLEM di prova.')),
             new CTag('li', true, _('Attendi la notifica Telegram e premi Aggiorna stato: confronta l’eventid PROBLEM con la ricevuta e il message_id.')),
+            new CTag('li', true, _('Nel messaggio Telegram premi Riconosci dal tuo account membro del gruppo. Aggiorna lo stato qui: l’evento deve risultare riconosciuto in Zabbix e l’audit deve riportare il tuo nome e ID Telegram.')),
             new CTag('li', true, _('Premi Genera RECOVERY di prova e attendi: il messaggio originale deve diventare RISOLTO mantenendo il message_id. Alta/Disastro: anche un nuovo messaggio di ripristino; severità 0–3: nessun nuovo messaggio. Aggiorna lo stato e confronta le ricevute.')),
             new CTag('li', true, _('Al termine rimuovi l’host di prova. La rimozione cancella soltanto host, item, trigger e storico di questa prova; per verificare il ripristino usa prima Genera RECOVERY.'))
         ]),
@@ -165,7 +166,9 @@ $checks = new CFormGrid([
     ]),
     new CLabel(_('Evento di prova Zabbix')), new CFormField($text('problem_test')),
     new CLabel(_('Ultime ricevute del bridge')),
-    new CFormField((new CDiv($text('notification_receipts')))->addClass(ZBX_STYLE_WORDBREAK)->addStyle('white-space: pre-line;'))
+    new CFormField((new CDiv($text('notification_receipts')))->addClass(ZBX_STYLE_WORDBREAK)->addStyle('white-space: pre-line;')),
+    new CLabel(_('Ultime operazioni Telegram (audit)')),
+    new CFormField((new CDiv($text('ack_audit')))->addClass(ZBX_STYLE_WORDBREAK)->addStyle('white-space: pre-line;'))
 ]);
 $page->addItem($notification_form('talk-notification-tests')->addItem(
     (new CTabView(['id' => 'talk-notification-tests-tabs']))

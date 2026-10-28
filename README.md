@@ -2,7 +2,7 @@
 
 Zabbix Talk integra un modulo di configurazione nel frontend Zabbix e un bridge Telegram locale per notifiche e operazioni sugli incidenti.
 
-Le slice #1–#4 e lo stile Telegram #16 sono integrate. La slice [#5](https://github.com/Capobuf/Zabbix-Talk/issues/5), sul branch locale `issue/5-multi-group-routing`, aggiunge le associazioni multi-gruppo e la risoluzione dei conflitti per host. Il comportamento corrente è descritto in fondo; le sezioni delle slice precedenti documentano anche le rispettive prove storiche.
+Le slice #1–#5 e lo stile Telegram #16 sono integrate. La slice [#6](https://github.com/Capobuf/Zabbix-Talk/issues/6) aggiunge l’ACK nativo dal messaggio Telegram. Il comportamento corrente è descritto in fondo; le sezioni delle slice precedenti documentano anche le rispettive prove storiche.
 
 ## Riferimenti di progetto
 
@@ -72,7 +72,7 @@ git pull --ff-only
 sudo ./scripts/install.sh /usr/share/zabbix/ui super
 ```
 
-Il branch della slice corrente è `issue/5-multi-group-routing`, ancora locale durante la revisione. Usa `git pull` dopo la pubblicazione del branch e la configurazione dell'upstream, oppure su `main` quando la modifica sarà integrata. Non sovrascrivere modifiche locali. Per modifiche al solo Python basta `sudo systemctl restart zabbix-talk`; per PHP aggiorna la pagina. Quando cambiano unità systemd, socket o permessi, riesegui l’installer. La VM usa il codice del checkout, senza build, container o dipendenze Python esterne.
+Il branch di sviluppo della slice #6 è `issue/6-telegram-ack`. Dopo il merge usa `main` per gli aggiornamenti. Non sovrascrivere modifiche locali. Per modifiche al solo Python basta `sudo systemctl restart zabbix-talk`; per PHP aggiorna la pagina. Quando cambiano unità systemd, socket o permessi, riesegui l’installer. La VM usa il codice del checkout, senza build, container o dipendenze Python esterne.
 
 ```bash
 systemctl status zabbix-talk --no-pager
@@ -282,3 +282,32 @@ Le risorse modificate esternamente continuano a bloccare il salvataggio. Anche l
 La prova live usa un solo gruppo Telegram senza topic. Due chat/topic differenti, conflitti fra destinazioni e creazione di topic sono verificati con risposte API controllate, non con un secondo cliente reale. L'host isolato rimane risolto e disponibile per la revisione; i due gruppi di collaudo restano associati. Nessun push o PR prima dell'approvazione dell'anteprima.
 
 Riferimenti: [condizioni e sottogruppi nelle Action](https://www.zabbix.com/documentation/7.4/en/manual/config/notifications/action/conditions), [host.get](https://www.zabbix.com/documentation/7.4/en/manual/api/reference/host/get), [token.generate](https://www.zabbix.com/documentation/7.4/en/manual/api/reference/token/generate), [createForumTopic](https://core.telegram.org/bots/api#createforumtopic).
+
+### ACK nativo da Telegram — slice #6
+
+1. Rendi il bot amministratore di ogni gruppo Telegram associato. È il requisito di `getChatMember` per verificare in modo affidabile gli altri membri; non sono richiesti permessi di eliminazione messaggi, gestione utenti o promozione amministratori.
+2. Apri **Zabbix Talk → Gestisci associazioni, anteprima host e conflitti**, conferma e premi **Salva e attiva routing**. Il controllo dei permessi Telegram precede le modifiche Zabbix. Il salvataggio riusa l’account tecnico, aggiunge soltanto `event.acknowledge` alla lista API consentita e abilita le due azioni native ACK/commento. Restano sola lettura sui gruppi autorizzati, frontend disabilitato e token nel file privato del bridge. Nessun token Super Admin.
+3. Nei nuovi Rich Message **PROBLEM**, premi **Riconosci**. Ogni membro attuale può agire, anche senza privilegi di amministratore Telegram. Il bridge verifica bot, identità personale, membership corrente, messaggio originale, chat/topic, evento/host e routing attuale. Chat private, copie inoltrate, messaggi inaccessibili, utenti usciti/espulsi, gruppi o topic differenti e conflitti sono rifiutati.
+4. Dopo la conferma Zabbix, lo stesso messaggio mostra **Riconosciuto in Zabbix** e rimuove il pulsante. Se il riconoscimento deriva da questa interazione, mostra l’identità Telegram; se era già riconosciuto esternamente, non lo attribuisce a chi ha appena premuto. Un evento già risolto non viene riconosciuto né ridisegnato come aperto. Il RECOVERY continua a modificare il messaggio originale e rimuove il pulsante.
+
+L’operazione nativa è `event.acknowledge` con azione `6` (ACK e commento). Il commento specifica nome, eventuale username, **Telegram ID**, chat/topic e identificativo dell’operazione. Zabbix registra tecnicamente il service account; il commento distingue la persona che ha richiesto l’ACK. Non viene introdotto uno stato «In lavorazione».
+
+**Zabbix Talk → 5. Verifica trasporto ed evento reale** mostra lo stato ACK letto da Zabbix per l’evento di prova e le ultime otto operazioni Telegram nell’**audit**, aggiornabili con **Aggiorna stato**. L’audit completo persiste nella tabella `audit` di `/var/lib/zabbix-talk/notifications.sqlite3`: operazione, evento, identità Telegram, destinazione/messaggio, istanti di richiesta/aggiornamento ed esito. Registra anche i rifiuti; non conserva token. Callback e chiavi dei pulsanti non sono esposte dalla route di stato.
+
+La richiesta viene registrata prima della chiamata Zabbix. Dopo riavvio o riconsegna non viene ripetuto automaticamente un ACK incerto: si rilegge Zabbix. Se risulta riconosciuto, si può aggiornare la presentazione senza aggiungere un secondo commento. Se l’esito resta incerto e l’evento non risulta riconosciuto, l’operazione rimane bloccata e richiede controllo dello storico Zabbix e dell’audit locale. Un rifiuto esplicito dell’API consente un nuovo tentativo dopo aver corretto il problema. ACK riuscito con modifica Telegram fallita è segnalato separatamente, senza annullare l’ACK o inviare un messaggio sostitutivo.
+
+Il pulsante compare solo nei nuovi PROBLEM dopo il salvataggio aggiornato. Lo storico non viene modificato in massa. Dopo un cambio di routing, il vecchio messaggio può riconoscere l’evento soltanto se la sua destinazione resta quella attualmente autorizzata per l’host; il RECOVERY mantiene invece la destinazione originale. Il polling estende quello esistente a `callback_query`, senza endpoint Telegram pubblico.
+
+Verifica automatizzata: **30 test del bridge superati**, inclusi membro ordinario, contesto contraffatto, membership e permessi persi, routing rimosso, ACK esterno, evento risolto, API negata, modifica Telegram fallita, persistenza dell’offset e risposta ACK incerta dopo riavvio. Sono prove con API controllate, non click reali dal telefono.
+
+Anteprima VM: verificata la pagina reale via HTTPS, senza errori JavaScript osservati, e il rifiuto del salvataggio con bot semplice membro. Aggiornamento parziale riuscito, con il testo non inviato nel campo token conservato; sezione di collaudo controllata a 1440 e 1024 px, con lo scorrimento orizzontale nativo della piattaforma. L’API del service account ha letto correttamente ACK e storico dell’evento reale 9386, risolto dall’evento 9387.
+
+Il 28 ottobre 2026 l’amministratore ha promosso il bot in **test-bot**. Telegram ha convertito il gruppo `-5346449149` nel supergruppo `-1004258910115`, comunicato tramite `ResponseParameters.migrate_to_chat_id`. Verificati bot amministratore e identità del nuovo supergruppo; aggiornato il collegamento locale e salvate dalla pagina le due associazioni dei gruppi di collaudo 25 e 27 verso il nuovo ID. Riutilizzati ruolo 6, gruppo utenti 16, Media Type 110, utente 5, Action 15 e macro 4. La migrazione è stata gestita operativamente durante questa prova; non è introdotto un meccanismo automatico di migrazione delle ricevute storiche.
+
+Il PROBLEM di prova 9666, tentato sul vecchio ID, conserva l’errore di migrazione e non è stato reinviato. Risolto con RECOVERY nativo 9667; il bridge non ha inviato un ripristino sostitutivo per un originale non confermato. Nuovo PROBLEM **9668**, host 10816 e trigger 34575 → Rich Message **2** confermato nel supergruppo, con pulsante **Riconosci**.
+
+L’operatore ha premuto il pulsante dal proprio account Telegram: callback reale elaborata dal polling, ACK **24** con azione **6**, `acknowledged=1` riletto con il token del service account. Il commento Zabbix identifica **CeSa (@capobuf), Telegram ID 6763365**, chat e operazione; il `userid` tecnico resta correttamente 5. Audit locale confermato e messaggio **2** aggiornato. Anche la pagina reale mostra **riconosciuto in Zabbix** e l’identità dell’operatore nell’audit, senza errori JavaScript osservati. Il caso di un membro ordinario e i casi di rifiuto sono coperti dai test controllati; il click reale è dell’amministratore del gruppo.
+
+L’utente ha approvato l’anteprima il 28 ottobre 2026, autorizzando la pubblicazione e il merge. Al termine della revisione l’evento di collaudo è stato risolto tramite il pulsante della pagina: RECOVERY **9673**, modifica dello stesso messaggio **2** e nuovo ripristino **5**, entrambi confermati. Host di prova e audit rimangono disponibili, senza un PROBLEM di collaudo aperto.
+
+Riferimenti ufficiali: [event.acknowledge](https://www.zabbix.com/documentation/7.4/en/manual/api/reference/event/acknowledge), [getChatMember](https://core.telegram.org/bots/api#getchatmember), [CallbackQuery](https://core.telegram.org/bots/api#callbackquery), [answerCallbackQuery](https://core.telegram.org/bots/api#answercallbackquery).
