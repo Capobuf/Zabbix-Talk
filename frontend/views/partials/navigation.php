@@ -2,10 +2,12 @@
 
 $current_section = $data['section'];
 $sections = ['overview' => _('Panoramica'), 'destinations' => _('Destinazioni'),
-    'notifications' => _('Notifiche'), 'settings' => _('Impostazioni'), 'tests' => _('Collaudi')];
+    'notifications' => _('Notifiche'), 'exclusions' => _('Controlli esclusi'),
+    'settings' => _('Impostazioni'), 'tests' => _('Collaudi')];
 $url = static fn(string $section): CUrl => (new CUrl('zabbix.php'))
     ->setArgument('action', in_array($section, ['destinations', 'notifications'])
-        ? 'zabbix.talk.destinations' : 'zabbix.talk.overview')->setArgument('section', $section);
+        ? 'zabbix.talk.destinations' : ($section === 'exclusions' ? 'zabbix.talk.exclusions' : 'zabbix.talk.overview'))
+    ->setArgument('section', $section);
 $links = new CList();
 foreach ($sections as $key => $caption) {
     $link = (new CLink($caption, $url($key)))->addClass('ui-tabs-anchor')->setAttribute('data-talk-section', $key);

@@ -91,6 +91,16 @@ class Bridge:
                        'callback_id TEXT PRIMARY KEY, operation TEXT, eventid TEXT, telegram_userid TEXT, actor TEXT, '
                        'chat_id TEXT, thread_id TEXT, message_id INTEGER, created_at INTEGER, updated_at INTEGER, '
                        'status TEXT, detail TEXT, comment TEXT)')
+            audit_columns = {row[1] for row in db.execute('PRAGMA table_info(audit)')}
+            for name, definition in [('triggerid', 'TEXT'), ('hostid', 'TEXT'), ('before_state', 'TEXT'),
+                                     ('after_state', 'TEXT'), ('reason', 'TEXT'), ('confirmation_key', 'TEXT'),
+                                     ('expires_at', 'INTEGER'), ('prompt_message_id', 'INTEGER')]:
+                if name not in audit_columns:
+                    db.execute(f'ALTER TABLE audit ADD COLUMN {name} {definition}')
+            db.execute('CREATE TABLE IF NOT EXISTS exclusions ('
+                       'triggerid TEXT PRIMARY KEY, hostid TEXT, eventid TEXT, host TEXT, description TEXT, '
+                       'actor TEXT, telegram_userid TEXT, chat_id TEXT, thread_id TEXT, message_id INTEGER, '
+                       'created_at INTEGER, updated_at INTEGER, status TEXT, snapshot TEXT, reason TEXT, detail TEXT)')
             db.execute('CREATE TABLE IF NOT EXISTS snoozes ('
                        'eventid TEXT, chat_id TEXT, thread_id TEXT, telegram_userid TEXT, actor TEXT, '
                        'until_at INTEGER, status TEXT, callback_id TEXT, reminder_id INTEGER, '
@@ -161,13 +171,13 @@ class Bridge:
                 raise ValueError
             if 'error' in result:
                 raise BridgeError('Zabbix ha rifiutato ' + method + '. Verifica i permessi del ruolo e l’accesso all’evento.')
-            expected = dict if method == 'event.acknowledge' else list
+            expected = dict if method in ('event.acknowledge', 'trigger.update') else list
             if not isinstance(result.get('result'), expected):
                 raise ValueError
             return result['result']
         except (OSError, ValueError, KeyError, TypeError):
             raise BridgeError('API Zabbix non raggiungibile o risposta non valida: operazione non confermata.',
-                              uncertain=method == 'event.acknowledge') from None
+                              uncertain=method in ('event.acknowledge', 'trigger.update')) from None
 
     def check_ack_permissions(self, destinations):
         with self.operations:
@@ -210,6 +220,7 @@ class Bridge:
                     raise BridgeError('Destinazione non registrata.')
             self.state['routing'] = {key: data[key] for key in ('routes', 'choices', 'api_token', 'api_url', 'revision')}
             self.state['routing']['ack_enabled'] = data.get('ack_enabled') is True
+            self.state['routing']['exclusions_enabled'] = data.get('exclusions_enabled') is True
             self.save()
         return {'message': 'Routing sincronizzato.'}
 
@@ -285,6 +296,9 @@ class Bridge:
             params = {'chat_id': int(data['chat_id']), 'rich_message': rich}
             if ack_key:
                 params['reply_markup'] = self.incident_keyboard(ack_key)
+                if current.get('routing', {}).get('exclusions_enabled'):
+                    params['reply_markup']['inline_keyboard'].append([
+                        {'text': 'Escludi questo problema', 'callback_data': 'exc:' + ack_key}])
             if thread:
                 params['message_thread_id'] = int(thread)
             try:
@@ -314,7 +328,7 @@ class Bridge:
         return value
 
     @staticmethod
-    def event_message(data, recovery=None, ack_label='', snooze_label='', reminder=False):
+    def event_message(data, recovery=None, ack_label='', snooze_label='', reminder=False, control_label=''):
         if data['kind'] == 'transport':
             return Bridge.test_message(transport=True)
         leds = ['⚪', '🔵', '🟡', '🟠', '🔴', '🔴']
@@ -333,6 +347,8 @@ class Bridge:
             content += '<p><b>Riconosciuto in Zabbix</b>' + (' · ' + html.escape(ack_label) if ack_label != 'Zabbix' else '') + '</p>'
         if snooze_label and not recovery:
             content += '<p>' + html.escape(snooze_label) + '</p>'
+        if control_label:
+            content += '<p>' + html.escape(control_label) + '</p>'
         started = Bridge.message_time(data['occurred_at'])
         if recovery:
             content += '<footer>' + html.escape(started) + ' → ' + html.escape(
@@ -377,7 +393,7 @@ class Bridge:
     def ack_event(self, routing, original):
         events = self.zabbix_api(routing, 'event.get', {
             'eventids': [original['eventid']], 'source': 0, 'object': 0, 'value': 1,
-            'output': ['eventid', 'acknowledged', 'r_eventid'], 'selectHosts': ['hostid'],
+            'output': ['eventid', 'objectid', 'acknowledged', 'r_eventid'], 'selectHosts': ['hostid'],
             'selectAcknowledges': ['acknowledgeid', 'action', 'message']})
         if (len(events) != 1 or str(events[0].get('eventid')) != original['eventid']
                 or [str(host['hostid']) for host in events[0].get('hosts', [])] != [original['hostid']]):
@@ -458,6 +474,308 @@ class Bridge:
         self.audit_result(query['id'], 'confirmed', 'ACK verificato in Zabbix e messaggio Telegram aggiornato.')
         return 'Evento riconosciuto in Zabbix. Messaggio aggiornato.'
 
+    def read_trigger(self, routing, triggerid, hostid):
+        if not routing.get('api_url') or not routing.get('api_token'):
+            raise BridgeError('Routing non disponibile: salva nuovamente le destinazioni.')
+        if not re.fullmatch(r'[1-9][0-9]{0,19}', str(triggerid)):
+            raise BridgeError('Identità del trigger non verificabile.')
+        triggers = self.zabbix_api(routing, 'trigger.get', {
+            'triggerids': [triggerid], 'editable': True, 'templated': False,
+            'output': ['triggerid', 'description', 'expression', 'recovery_expression', 'templateid', 'flags', 'status'],
+            'selectHosts': ['hostid', 'name', 'status'], 'selectItems': ['itemid', 'hostid', 'flags'],
+            'selectDiscoveryData': ['parent_triggerid', 'status', 'disable_source'],
+            'selectDiscoveryRule': ['itemid', 'hostid']})
+        if len(triggers) != 1:
+            raise BridgeError('Trigger non modificabile o non accessibile. Verifica i permessi e salva le destinazioni.')
+        trigger = triggers[0]
+        hosts, items = trigger.get('hosts', []), trigger.get('items', [])
+        if (str(trigger.get('triggerid')) != str(triggerid) or len(hosts) != 1
+                or str(hosts[0]['hostid']) != hostid or str(hosts[0]['status']) not in ('0', '1')
+                or str(trigger.get('flags')) not in ('0', '4') or str(trigger.get('status')) not in ('0', '1')
+                or not items or any(str(item['hostid']) != hostid or str(item['flags']) not in ('0', '4') for item in items)):
+            raise BridgeError('Scope non sicuro: serve un singolo trigger concreto su un solo host, senza template o prototipi.')
+        discovery, rule = trigger.get('discoveryData') or {}, trigger.get('discoveryRule') or {}
+        if str(trigger['flags']) == '4' and (
+                not re.fullmatch(r'[1-9][0-9]*', str(discovery.get('parent_triggerid', '')))
+                or str(discovery.get('status')) != '0' or str(discovery.get('disable_source')) not in ('0', '1')
+                or not rule.get('itemid') or str(rule.get('hostid')) != hostid):
+            raise BridgeError('Trigger LLD non più scoperto o identità della discovery non verificabile. Nessuna modifica.')
+        return {**{key: str(trigger[key]) for key in
+                   ('triggerid', 'description', 'expression', 'recovery_expression', 'templateid', 'flags', 'status')},
+                'hostid': hostid, 'host': hosts[0]['name'],
+                'itemids': sorted(str(item['itemid']) for item in items),
+                'parent_triggerid': str(discovery.get('parent_triggerid', '')),
+                'discovery_ruleid': str(rule.get('itemid', '')),
+                'disable_source': str(discovery.get('disable_source', ''))}
+
+    @staticmethod
+    def trigger_identity(snapshot):
+        return {key: value for key, value in snapshot.items() if key not in ('status', 'disable_source')}
+
+    def exclusion_row(self, triggerid):
+        with self.receipts() as db:
+            db.row_factory = sqlite3.Row
+            return db.execute('SELECT * FROM exclusions WHERE triggerid=?', (triggerid,)).fetchone()
+
+    def control_for_incident(self, current, original, event):
+        if not current.get('routing', {}).get('exclusions_enabled'):
+            raise BridgeError('Salva nuovamente le destinazioni per abilitare esclusione e riattivazione.')
+        return self.read_trigger(current['routing'], str(event.get('objectid', '')), original['hostid'])
+
+    def recovery_payload(self, original, event):
+        if str(event['r_eventid']) == '0':
+            return None
+        with self.receipts() as db:
+            row = db.execute("SELECT payload FROM receipts WHERE id=? AND status='sent' AND recovery_eventid=?",
+                             ('recovery:' + original['eventid'], str(event['r_eventid']))).fetchone()
+        if not row or not row[0]:
+            raise BridgeError('RECOVERY non ancora disponibile nel messaggio. Riattiva da Controlli esclusi nella UI Zabbix Talk.')
+        return json.loads(row[0])
+
+    def check_control_change(self, snapshot, enabling):
+        if snapshot['status'] != ('1' if enabling else '0'):
+            raise BridgeError('Il trigger è già attivo.' if enabling else 'Il trigger è già disabilitato: non viene adottato come esclusione Zabbix Talk.')
+        row = self.exclusion_row(snapshot['triggerid'])
+        if enabling and (not row or row['status'] not in ('disabled', 'submitting', 'uncertain')
+                or self.trigger_identity(json.loads(row['snapshot'])) != self.trigger_identity(snapshot)):
+            raise BridgeError('Esclusione gestita assente o trigger modificato esternamente. Verifica la configurazione Zabbix.')
+        if enabling and snapshot['flags'] == '4' and snapshot['disable_source'] != '0':
+            raise BridgeError('Trigger disabilitato dalla discovery LLD: riattivazione automatica non consentita.')
+        with self.receipts() as db:
+            pending = db.execute("SELECT 1 FROM audit WHERE triggerid=? AND operation IN ('EXCLUDE','ENABLE') "
+                                 "AND status IN ('submitting','uncertain')", (snapshot['triggerid'],)).fetchone()
+        if pending:
+            raise BridgeError('Operazione precedente non confermata. Verifica trigger e audit in Zabbix prima di intervenire; nessun reinvio automatico.')
+
+    def change_control(self, current, original, snapshot, enabling, operation_id, actor, telegram_userid='', reason=''):
+        self.check_control_change(snapshot, enabling)
+        now = int(time.time())
+        target = '0' if enabling else '1'
+        with self.receipts() as db:
+            db.execute('UPDATE audit SET triggerid=?,hostid=?,before_state=?,reason=? WHERE callback_id=?',
+                       (snapshot['triggerid'], snapshot['hostid'], json.dumps(snapshot), reason, operation_id))
+            if not enabling:
+                db.execute('INSERT INTO exclusions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
+                           'ON CONFLICT(triggerid) DO UPDATE SET eventid=excluded.eventid,host=excluded.host,'
+                           'description=excluded.description,actor=excluded.actor,telegram_userid=excluded.telegram_userid,'
+                           'chat_id=excluded.chat_id,thread_id=excluded.thread_id,message_id=excluded.message_id,'
+                           'created_at=excluded.created_at,updated_at=excluded.updated_at,status=excluded.status,'
+                           'snapshot=excluded.snapshot,reason=excluded.reason,detail=excluded.detail',
+                           (snapshot['triggerid'], snapshot['hostid'], original['eventid'], snapshot['host'], snapshot['description'],
+                            actor, telegram_userid, original['chat_id'], original['thread_id'], original['message_id'],
+                            now, now, 'submitting', json.dumps(snapshot), reason, 'Esclusione in corso: verificare Zabbix.'))
+        self.audit_result(operation_id, 'submitting', 'Cambio di stato del singolo trigger in corso.')
+        try:
+            result = self.zabbix_api(current['routing'], 'trigger.update', {'triggerid': snapshot['triggerid'], 'status': int(target)})
+            if [str(value) for value in result.get('triggerids', [])] != [snapshot['triggerid']]:
+                raise BridgeError('Risultato trigger.update inatteso. Verifica Zabbix.', uncertain=True)
+            after = self.read_trigger(current['routing'], snapshot['triggerid'], snapshot['hostid'])
+            with self.receipts() as db:
+                db.execute('UPDATE audit SET after_state=? WHERE callback_id=?', (json.dumps(after), operation_id))
+            if (after['status'] != target or self.trigger_identity(after) != self.trigger_identity(snapshot)
+                    or (not enabling and after['flags'] == '4' and after['disable_source'] != '0')):
+                raise BridgeError('Stato o identità del trigger non confermati dopo la modifica. Verifica Zabbix.', uncertain=True)
+        except BridgeError as error:
+            # A read failure after an accepted write is uncertain, even if the read itself is harmless.
+            uncertain = error.uncertain or 'result' in locals()
+            self.audit_result(operation_id, 'uncertain' if uncertain else 'failed', str(error))
+            with self.receipts() as db:
+                db.execute('UPDATE exclusions SET status=?,detail=?,updated_at=? WHERE triggerid=?',
+                           ('uncertain' if uncertain else ('disabled' if enabling else 'failed'), str(error), now, snapshot['triggerid']))
+            raise
+        message = 'Controllo riattivato in Zabbix.' if enabling else 'Controllo escluso in Zabbix. Gli altri controlli restano attivi.'
+        with self.receipts() as db:
+            db.execute('UPDATE exclusions SET status=?,detail=?,updated_at=? WHERE triggerid=?',
+                       ('enabled' if enabling else 'disabled', message, now, snapshot['triggerid']))
+        self.audit_result(operation_id, 'confirmed', message)
+        return message
+
+    @staticmethod
+    def control_confirmation(snapshot, enabling, key, nonce, reason=''):
+        title = 'Riattivare questo controllo?' if enabling else 'Escludere questo controllo?'
+        effect = ('Zabbix tornerà a valutare il controllo.' if enabling else
+                  'Il controllo sarà disattivato in Zabbix, per tutti i canali. Gli altri controlli restano attivi.')
+        content = ('<h3>' + title + '</h3><p><b>' + html.escape(snapshot['host'])
+                   + '</b></p><blockquote><p>' + html.escape(snapshot['description']) + '</p></blockquote><p>' + effect + '</p>')
+        if reason:
+            content += '<p><b>Motivo:</b> ' + html.escape(reason) + '</p>'
+        rows = [[{'text': 'Riattiva controllo' if enabling else 'Escludi controllo',
+                  'callback_data': ('ena:' if enabling else 'exc:') + key + ':' + nonce},
+                 {'text': 'Annulla', 'callback_data': 'can:' + key + ':' + nonce}]]
+        if not enabling:
+            rows.append([{'text': 'Aggiungi un motivo (facoltativo)', 'callback_data': 'why:' + key}])
+        return {'rich_message': {'html': content, 'skip_entity_detection': True},
+                'reply_markup': {'inline_keyboard': rows}}
+
+    def trigger_callback(self, query, token):
+        with self.operations:
+            with self.lock:
+                current = copy.deepcopy(self.state)
+            if token != current.get('token') or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', str(query.get('id', ''))):
+                return
+            match = re.fullmatch(r'(exc|ena|can|why):([a-f0-9]{32})(?::([a-f0-9]{16}))?', query.get('data', ''))
+            if not match:
+                return
+            action, key, confirmation = match.groups()
+            sender, message = query.get('from', {}), query.get('message', {})
+            operation = 'ENABLE' if action == 'ena' else 'EXCLUDE'
+            if not confirmation:
+                operation += '_REQUEST'
+            if action == 'can':
+                operation = 'CANCEL'
+            elif action == 'why':
+                operation = 'EXCLUDE_REASON'
+            show_alert = True
+            with self.receipts() as db:
+                db.row_factory = sqlite3.Row
+                original = db.execute('SELECT * FROM receipts WHERE ack_key=?', (key,)).fetchone()
+                previous = db.execute('SELECT status FROM audit WHERE callback_id=?', (query['id'],)).fetchone()
+                db.execute('INSERT OR IGNORE INTO audit '
+                           '(callback_id,operation,eventid,telegram_userid,actor,chat_id,thread_id,message_id,created_at,updated_at,status,detail,reason) '
+                           'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                           (query['id'], operation, original['eventid'] if original else '', str(sender.get('id', ''))[:20],
+                            self.actor_name(sender), str(message.get('chat', {}).get('id', ''))[:24],
+                            str(message.get('message_thread_id') or '')[:20], message.get('message_id'),
+                            int(time.time()), int(time.time()), 'checking', 'Verifica autorizzazione in corso.', query.get('_reason', '')))
+            try:
+                event = self.authorize_incident(query, token, current, original)
+                if not previous:
+                    with self.receipts() as db:
+                        db.execute('UPDATE audit SET triggerid=?,hostid=? WHERE callback_id=?',
+                                   (str(event.get('objectid', '')), original['hostid'], query['id']))
+                if previous:
+                    result = 'Richiesta già elaborata. Controlla lo stato in Zabbix Talk; nessuna modifica ripetuta.'
+                elif action == 'why':
+                    snapshot = self.control_for_incident(current, original, event)
+                    self.check_control_change(snapshot, False)
+                    if str(event['r_eventid']) != '0':
+                        raise BridgeError('Problema già risolto: nessun controllo escluso.')
+                    params = {'chat_id': int(original['chat_id']), 'parse_mode': 'HTML',
+                              'text': '<a href="tg://user?id=' + str(sender['id']) + '">' + html.escape(sender.get('first_name') or 'Operatore')
+                                      + '</a>, perché vuoi escludere questo controllo?\n'
+                                      + html.escape(snapshot['host']) + ' · ' + html.escape(snapshot['description'])
+                                      + '\nScrivi il motivo qui sotto (massimo 500 caratteri).',
+                              'reply_parameters': {'message_id': original['message_id']},
+                              'reply_markup': {'force_reply': True, 'selective': True, 'input_field_placeholder': 'Motivo dell’esclusione'}}
+                    if original['thread_id']:
+                        params['message_thread_id'] = int(original['thread_id'])
+                    prompt = self.api(token, 'sendMessage', params)
+                    if not isinstance(prompt, dict) or not prompt.get('message_id'):
+                        raise BridgeError('Campo del motivo non aperto: riprova. Nessun controllo modificato.')
+                    with self.receipts() as db:
+                        db.execute("UPDATE audit SET prompt_message_id=?,expires_at=?,triggerid=?,hostid=?,before_state=? WHERE callback_id=?",
+                                   (prompt['message_id'], int(time.time()) + 300, snapshot['triggerid'], snapshot['hostid'], json.dumps(snapshot), query['id']))
+                        db.execute("UPDATE audit SET status='cancelled' WHERE eventid=? AND telegram_userid=? AND status IN ('awaiting_confirmation','awaiting_reason')",
+                                   (original['eventid'], str(sender['id'])))
+                    self.audit_result(query['id'], 'awaiting_reason', 'Campo del motivo aperto per l’operatore; nessuna modifica Zabbix.')
+                    result = 'Scrivi il motivo nel campo di risposta aperto da Telegram.'
+                    show_alert = False
+                elif action == 'can':
+                    with self.receipts() as db:
+                        db.execute("UPDATE audit SET status='cancelled' WHERE confirmation_key=? AND telegram_userid=? AND status='awaiting_confirmation'",
+                                   (confirmation, str(sender['id'])))
+                    self.edit_incident(token, original, event)
+                    self.audit_result(query['id'], 'cancelled', 'Conferma annullata; nessuna modifica Zabbix.')
+                    result = 'Operazione annullata.'
+                else:
+                    snapshot = self.control_for_incident(current, original, event)
+                    if action == 'exc' and str(event['r_eventid']) != '0':
+                        raise BridgeError('Problema già risolto: nessun trigger escluso.')
+                    self.check_control_change(snapshot, action == 'ena')
+                    if not confirmation:
+                        nonce = secrets.token_hex(8)
+                        with self.receipts() as db:
+                            db.execute('UPDATE audit SET triggerid=?,hostid=?,before_state=?,confirmation_key=?,expires_at=?,status=? WHERE callback_id=?',
+                                       (snapshot['triggerid'], snapshot['hostid'], json.dumps(snapshot), nonce,
+                                        int(time.time()) + 300, 'awaiting_confirmation', query['id']))
+                        message = self.api(token, 'editMessageText', {'chat_id': int(original['chat_id']), 'message_id': original['message_id'],
+                            **self.control_confirmation(snapshot, action == 'ena', key, nonce, query.get('_reason', ''))})
+                        if not isinstance(message, dict) or message.get('message_id') != original['message_id'] or not message.get('rich_message'):
+                            raise BridgeError('Conferma non visualizzata: nessun controllo modificato. Riprova dal messaggio originale.')
+                        self.audit_result(query['id'], 'awaiting_confirmation', 'Conferma richiesta; nessuna modifica Zabbix ancora eseguita.')
+                        result = 'Controlla host e controllo nel messaggio, poi conferma.'
+                        show_alert = False
+                    else:
+                        with self.receipts() as db:
+                            db.row_factory = sqlite3.Row
+                            pending = db.execute('SELECT * FROM audit WHERE confirmation_key=?', (confirmation,)).fetchone()
+                            if (not pending or pending['status'] != 'awaiting_confirmation' or pending['expires_at'] < time.time()
+                                    or pending['telegram_userid'] != str(sender['id']) or pending['eventid'] != original['eventid']
+                                    or pending['operation'] != operation + '_REQUEST' or json.loads(pending['before_state']) != snapshot):
+                                raise BridgeError('Conferma scaduta, di un altro membro o stato modificato. Richiedi una nuova conferma.')
+                            db.execute("UPDATE audit SET status='consumed' WHERE callback_id=?", (pending['callback_id'],))
+                        result = self.change_control(current, original, snapshot, action == 'ena', query['id'],
+                                                     self.actor_name(sender), str(sender['id']), pending['reason'] or '')
+                        try:
+                            self.edit_incident(token, original, event)
+                        except BridgeError as error:
+                            self.audit_result(query['id'], 'telegram_failed', result + ' Messaggio non aggiornato. ' + str(error))
+                            result += ' Messaggio non aggiornato: consulta Controlli esclusi.'
+            except BridgeError as error:
+                with self.receipts() as db:
+                    status = db.execute('SELECT status FROM audit WHERE callback_id=?', (query['id'],)).fetchone()[0]
+                if status in ('checking', 'awaiting_confirmation') and not previous:
+                    self.audit_result(query['id'], 'denied', str(error))
+                result = str(error)
+            if not query.get('_command'):
+                try:
+                    self.api(token, 'answerCallbackQuery', {'callback_query_id': query['id'], 'text': result[:200], 'show_alert': show_alert})
+                except BridgeError:
+                    pass
+            return result
+
+    def excluded_controls(self):
+        with self.lock:
+            routing = copy.deepcopy(self.state.get('routing', {}))
+        with self.receipts() as db:
+            db.row_factory = sqlite3.Row
+            rows = [dict(row) for row in db.execute("SELECT * FROM exclusions WHERE status NOT IN ('enabled','failed') ORDER BY created_at DESC")]
+        for row in rows:
+            row['can_enable'] = False
+            try:
+                snapshot = self.read_trigger(routing, row['triggerid'], row['hostid'])
+                row['current_status'] = snapshot['status']
+                self.check_control_change(snapshot, True)
+                row['can_enable'] = True
+            except BridgeError as error:
+                row['detail'] = str(error)
+            row.pop('snapshot')
+        return {'exclusions': rows, 'enabled': routing.get('exclusions_enabled', False)}
+
+    def enable_control(self, triggerid, actor):
+        with self.operations:
+            with self.lock:
+                current = copy.deepcopy(self.state)
+            row = self.exclusion_row(triggerid)
+            if not row or not current.get('routing', {}).get('exclusions_enabled') or not isinstance(actor, str) or not actor.startswith('Zabbix: '):
+                raise BridgeError('Riattivazione non autorizzata o esclusione assente.')
+            operation_id = 'ui-' + secrets.token_hex(16)
+            with self.receipts() as db:
+                db.execute('INSERT INTO audit '
+                           '(callback_id,operation,eventid,actor,chat_id,thread_id,message_id,created_at,updated_at,status,detail,triggerid,hostid) '
+                           'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                           (operation_id, 'ENABLE', row['eventid'], actor[:220], row['chat_id'], row['thread_id'], row['message_id'],
+                            int(time.time()), int(time.time()), 'checking', 'Riattivazione richiesta dal frontend.', triggerid, row['hostid']))
+            try:
+                snapshot = self.read_trigger(current['routing'], triggerid, row['hostid'])
+                result = self.change_control(current, row, snapshot, True, operation_id, actor)
+            except BridgeError as error:
+                with self.receipts() as db:
+                    status = db.execute('SELECT status FROM audit WHERE callback_id=?', (operation_id,)).fetchone()[0]
+                if status == 'checking':
+                    self.audit_result(operation_id, 'denied', str(error))
+                raise
+            with self.receipts() as db:
+                db.row_factory = sqlite3.Row
+                original = db.execute('SELECT * FROM receipts WHERE id=?', ('problem:' + row['eventid'],)).fetchone()
+            if original and original['bot_id'] == str(current.get('bot', {}).get('id')):
+                try:
+                    self.edit_incident(current['token'], original, self.ack_event(current['routing'], original))
+                except BridgeError as error:
+                    self.audit_result(operation_id, 'telegram_failed', result + ' Messaggio non aggiornato. ' + str(error))
+                    result += ' Messaggio Telegram non aggiornato; consulta l’audit.'
+            return {'message': result}
+
     def snooze_row(self, original):
         with self.receipts() as db:
             db.row_factory = sqlite3.Row
@@ -477,6 +795,35 @@ class Bridge:
         return 'Snooze' + (' di ' + ' e '.join(duration) if duration else ' attivo') + ' · fino al ' + deadline
 
     def edit_incident(self, token, original, event):
+        with self.lock:
+            current = copy.deepcopy(self.state)
+        control_label = ''
+        control_button = None
+        if current.get('routing', {}).get('exclusions_enabled'):
+            try:
+                snapshot = self.control_for_incident(current, original, event)
+                row = self.exclusion_row(snapshot['triggerid'])
+                if row and row['status'] == 'disabled' and snapshot['status'] == '1':
+                    control_label = 'Controllo escluso in Zabbix · ' + re.sub(r' \(Telegram ID [0-9]+\)$', '', row['actor']) + (' · Motivo: ' + row['reason'] if row['reason'] else '')
+                    control_button = {'text': 'Riattiva questo controllo', 'callback_data': 'ena:' + original['ack_key']}
+                elif snapshot['status'] == '0' and str(event['r_eventid']) == '0':
+                    control_button = {'text': 'Escludi questo problema', 'callback_data': 'exc:' + original['ack_key']}
+            except BridgeError:
+                control_label = 'Stato del controllo non verificabile: consulta Controlli esclusi in Zabbix Talk.'
+        keyboard = self.incident_keyboard(original['ack_key'], str(event['acknowledged']) == '1') if str(event['r_eventid']) == '0' else self.ack_keyboard()
+        if control_button:
+            keyboard['inline_keyboard'].append([control_button])
+        if str(event['r_eventid']) != '0':
+            try:
+                recovery = self.recovery_payload(original, event)
+            except BridgeError:
+                self.api(token, 'editMessageReplyMarkup', {'chat_id': int(original['chat_id']),
+                    'message_id': original['message_id'], 'reply_markup': keyboard})
+                return
+            self.api(token, 'editMessageText', {'chat_id': int(original['chat_id']), 'message_id': original['message_id'],
+                'rich_message': self.event_message(json.loads(original['payload']), recovery, control_label=control_label),
+                'reply_markup': keyboard})
+            return
         ack_label = ''
         if str(event['acknowledged']) == '1':
             ack_label = 'Zabbix'
@@ -497,8 +844,8 @@ class Bridge:
                 label = snooze['detail']
         params = {'chat_id': int(original['chat_id']), 'message_id': original['message_id'],
                   'rich_message': self.event_message(json.loads(original['payload']),
-                      ack_label=ack_label, snooze_label=label),
-                  'reply_markup': self.incident_keyboard(original['ack_key'], str(event['acknowledged']) == '1')}
+                      ack_label=ack_label, snooze_label=label, control_label=control_label),
+                  'reply_markup': keyboard}
         try:
             message = self.api(token, 'editMessageText', params)
             if not isinstance(message, dict) or message.get('message_id') != original['message_id'] or not message.get('rich_message'):
@@ -556,6 +903,8 @@ class Bridge:
         return (name + ' ' if name else '') + '(Telegram ID ' + str(sender.get('id', 'sconosciuto'))[:20] + ')'
 
     def callback(self, query, token):
+        if isinstance(query.get('data'), str) and query['data'].startswith(('exc:', 'ena:', 'can:', 'why:')):
+            return self.trigger_callback(query, token)
         with self.operations:
             with self.lock:
                 current = copy.deepcopy(self.state)
@@ -575,7 +924,9 @@ class Bridge:
                 original = db.execute('SELECT * FROM receipts WHERE ack_key=?',
                                       (match[2] if valid else '',)).fetchone()
                 previous = db.execute('SELECT status FROM audit WHERE callback_id=?', (callback_id,)).fetchone()
-                db.execute('INSERT OR IGNORE INTO audit VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                db.execute('INSERT OR IGNORE INTO audit '
+                           '(callback_id,operation,eventid,telegram_userid,actor,chat_id,thread_id,message_id,created_at,updated_at,status,detail,comment) '
+                           'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
                            (callback_id, 'SNOOZE' if is_snooze else 'ACK', original['eventid'] if original else '', str(sender.get('id', ''))[:20],
                             self.actor_name(sender), str(message.get('chat', {}).get('id', ''))[:24],
                             str(message.get('message_thread_id') or '')[:20], message.get('message_id'),
@@ -630,6 +981,67 @@ class Bridge:
                   'reply_parameters': {'message_id': message['message_id']}}
         if thread:
             params['message_thread_id'] = int(thread)
+        self.api(token, 'sendMessage', params)
+
+    def exclusion_reason_reply(self, message, token):
+        reply = message.get('reply_to_message', {})
+        with self.lock:
+            current = copy.deepcopy(self.state)
+        if not reply or token != current.get('token'):
+            return
+        with self.receipts() as db:
+            db.row_factory = sqlite3.Row
+            pending = db.execute("SELECT * FROM audit WHERE operation='EXCLUDE_REASON' AND prompt_message_id=? AND chat_id=?",
+                                 (reply.get('message_id'), str(message.get('chat', {}).get('id')))).fetchone()
+            if not pending:
+                return
+            original = db.execute('SELECT * FROM receipts WHERE id=?', ('problem:' + pending['eventid'],)).fetchone()
+        sender = message.get('from', {})
+        reason = message.get('text', '').strip()
+        # Ordinary reply threads are not forum destinations, even when Telegram supplies a thread ID.
+        topic = str(message.get('message_thread_id') or '') if message.get('is_topic_message') else ''
+        operation_id = 'msg-' + str(message['chat']['id']) + '-' + str(message['message_id'])
+        if (message.get('sender_chat') or message.get('external_reply') or sender.get('is_bot')
+                or str(sender.get('id')) != pending['telegram_userid']
+                or topic != pending['thread_id']
+                or reply.get('from', {}).get('id') != current.get('bot', {}).get('id')
+                or not original or original['bot_id'] != str(current.get('bot', {}).get('id'))):
+            result = 'Il motivo deve essere scritto da chi ha aperto la richiesta, nel gruppo e topic originali.'
+        elif pending['status'] != 'awaiting_reason':
+            return
+        elif pending['expires_at'] < time.time():
+            result = 'Richiesta scaduta. Premi di nuovo Aggiungi un motivo.'
+        elif not 1 <= len(reason) <= 500:
+            result = 'Scrivi un motivo da 1 a 500 caratteri, poi invialo.'
+        else:
+            with self.receipts() as db:
+                db.execute("UPDATE audit SET status='consumed' WHERE callback_id=?", (pending['callback_id'],))
+            # The personal reply is bound to our persisted prompt and its original incident.
+            context = {'message_id': original['message_id'], 'date': original['updated_at'],
+                       'chat': message['chat'], 'message_thread_id': original['thread_id'] or None,
+                       'from': {'id': current['bot']['id'], 'is_bot': True}}
+            result = self.callback({'id': operation_id, 'data': 'exc:' + original['ack_key'], 'from': sender,
+                           'message': context, '_command': True,
+                           '_reason': re.sub(r'[\x00-\x1f\x7f\u202a-\u202e\u2066-\u2069]', ' ', reason)}, token)
+            with self.receipts() as db:
+                status = db.execute('SELECT status FROM audit WHERE callback_id=?', (operation_id,)).fetchone()
+            if status and status[0] == 'awaiting_confirmation':
+                return
+            params = {'chat_id': message['chat']['id'], 'text': result, 'reply_parameters': {'message_id': message['message_id']}}
+            if topic:
+                params['message_thread_id'] = int(topic)
+            self.api(token, 'sendMessage', params)
+            return
+        with self.receipts() as db:
+            db.execute('INSERT OR IGNORE INTO audit '
+                       '(callback_id,operation,eventid,telegram_userid,actor,chat_id,thread_id,message_id,created_at,updated_at,status,detail) '
+                       'VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                       (operation_id, 'EXCLUDE_REASON_REPLY', pending['eventid'], str(sender.get('id', ''))[:20],
+                        self.actor_name(sender), pending['chat_id'], topic,
+                        message['message_id'], int(time.time()), int(time.time()), 'denied', result))
+        params = {'chat_id': message['chat']['id'], 'text': result, 'reply_parameters': {'message_id': message['message_id']}}
+        if topic:
+            params['message_thread_id'] = int(topic)
         self.api(token, 'sendMessage', params)
 
     def expire_snoozes(self):
@@ -729,6 +1141,13 @@ class Bridge:
                   'rich_message': self.event_message(event, data)}
         if original['ack_key']:
             params['reply_markup'] = self.ack_keyboard()
+            with self.receipts() as db:
+                row = db.execute("SELECT triggerid,actor FROM exclusions WHERE eventid=? AND status='disabled'", (original['eventid'],)).fetchone()
+            if row:
+                params['rich_message'] = self.event_message(event, data,
+                    control_label='Controllo escluso in Zabbix · ' + re.sub(r' \(Telegram ID [0-9]+\)$', '', row[1]))
+                params['reply_markup']['inline_keyboard'].append([
+                    {'text': 'Riattiva questo controllo', 'callback_data': 'ena:' + original['ack_key']}])
         edited = False
         recovery_message_id = None
         try:
@@ -755,9 +1174,9 @@ class Bridge:
                            ('unconfirmed', detail, int(time.time()), receipt_id))
             raise BridgeError(detail, error.retry_after) from None
         with self.receipts() as db:
-            db.execute('UPDATE receipts SET status=?,detail=?,updated_at=?,recovery_message_id=? WHERE id=?',
+            db.execute('UPDATE receipts SET status=?,detail=?,updated_at=?,recovery_message_id=?,payload=? WHERE id=?',
                        ('sent', 'Originale risolto; ' + ('nuovo ripristino confermato.' if recovery_message_id else 'nessun nuovo messaggio previsto.'),
-                        int(time.time()), recovery_message_id, receipt_id))
+                        int(time.time()), recovery_message_id, json.dumps(data), receipt_id))
         return {'message_id': original['message_id'], 'recovery_message_id': recovery_message_id, 'duplicate': False}
 
     def save(self):
@@ -791,7 +1210,7 @@ class Bridge:
                     'SELECT kind,eventid,host,chat_id,thread_id,message_id,status,detail,updated_at,recovery_eventid,recovery_message_id '
                     'FROM receipts ORDER BY updated_at DESC, rowid DESC LIMIT 8')]
                 audit = [dict(row) for row in db.execute(
-                    'SELECT operation,eventid,telegram_userid,actor,chat_id,thread_id,message_id,created_at,updated_at,status,detail '
+                    'SELECT operation,eventid,telegram_userid,actor,chat_id,thread_id,message_id,created_at,updated_at,status,detail,triggerid,hostid,before_state,after_state,reason '
                     'FROM audit ORDER BY updated_at DESC,rowid DESC LIMIT 8')]
                 snoozes = [dict(row) for row in db.execute(
                     'SELECT eventid,chat_id,thread_id,actor,until_at,status,reminder_id,detail '
@@ -801,6 +1220,7 @@ class Bridge:
                 'audit': audit,
                 'snoozes': snoozes,
                 'ack_enabled': self.state.get('routing', {}).get('ack_enabled', False),
+                'exclusions_enabled': self.state.get('routing', {}).get('exclusions_enabled', False),
                 'bot': self.state.get('bot'),
                 'verified_at': self.state.get('verified_at'),
                 'polling': self.last_poll > time.time() - 80 and not self.poll_error,
@@ -987,6 +1407,7 @@ class Bridge:
                     if 'message' in update:
                         self.register_message(update['message'], token)
                         self.snooze_command(update['message'], token)
+                        self.exclusion_reason_reply(update['message'], token)
                     if 'callback_query' in update:
                         self.callback(update['callback_query'], token)
                     with self.lock:
@@ -1037,7 +1458,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self.server.bridge.authorized(self.headers.get('Authorization', '')):
                 self.reply(401, {'error': 'Autenticazione locale non valida.'})
                 return
-        elif not control or self.path not in ('/action', '/channel', '/routing', '/ack-permissions'):
+        elif not control or self.path not in ('/action', '/channel', '/routing', '/ack-permissions', '/exclusions', '/enable-control'):
             self.reply(404, {'error': 'Percorso non disponibile.'})
             return
         try:
@@ -1055,6 +1476,10 @@ class Handler(BaseHTTPRequestHandler):
                 result = self.server.bridge.check_ack_permissions(data.get('destinations'))
             elif self.path == '/channel':
                 result = self.server.bridge.channel()
+            elif self.path == '/exclusions':
+                result = self.server.bridge.excluded_controls()
+            elif self.path == '/enable-control':
+                result = self.server.bridge.enable_control(str(data.get('triggerid', '')), data.get('actor', ''))
             else:
                 result = {'message': self.server.bridge.action(data.get('operation'), data.get('token', ''), data.get('destination_key', ''), data.get('topic_name', ''))}
             self.reply(200, result)
