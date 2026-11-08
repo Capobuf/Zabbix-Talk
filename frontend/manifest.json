@@ -23,6 +23,13 @@
     "zabbix.talk.destinations": {
       "class": "Destinations",
       "view": "zabbix.talk.destinations"
+    },
+    "zabbix.talk.exclusions": {
+      "class": "Exclusions",
+      "view": "zabbix.talk.exclusions"
+    },
+    "zabbix.talk.enable": {
+      "class": "Enable"
     }
   },
   "assets": {
