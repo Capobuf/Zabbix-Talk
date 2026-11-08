@@ -5,6 +5,7 @@ namespace Modules\ZabbixTalk;
 use API;
 use CSessionHelper;
 use CSettingsHelper;
+use CWebUser;
 use CZabbixServer;
 use RuntimeException;
 use Throwable;
@@ -78,11 +79,44 @@ class Notifications {
         return $value;
     }
 
+    private static function comparable(string $key, array $resource): array {
+        // DBpatch_7050116 denies proxy access for pre-existing groups (new groups default to allow).
+        if ($key === 'group') {
+            $resource += ['proxy_mode' => '0', 'proxy_group_mode' => '0'];
+        }
+        elseif ($key === 'role' && in_array((int) $resource['type'], [USER_TYPE_ZABBIX_USER, USER_TYPE_ZABBIX_ADMIN])) {
+            $rules = &$resource['rules'];
+            // 8.0 role.get defaults; DBpatch_7050085 disables devices for custom technical roles.
+            $rules += ['profile.redirect.enforce' => '0', 'profile.redirect.url' => '',
+                'devices.access' => '0', 'devices.actions.default_access' => '0'];
+            $additions = [
+                'ui' => ['apm.traces', 'apm.metrics', 'apm.logs'],
+                'actions' => [],
+                'devices.actions' => ['manage_own']
+            ];
+            if ((int) $resource['type'] === USER_TYPE_ZABBIX_ADMIN) {
+                $additions['ui'][] = 'reports.system_info';
+                $additions['actions'][] = 'select_server_for_monitoring';
+            }
+            foreach ($additions as $section => $names) {
+                $rules[$section] ??= [];
+                $default = $rules[$section.'.default_access'];
+                foreach ($names as $name) {
+                    if (!in_array($name, array_column($rules[$section], 'name'), true)) {
+                        $rules[$section][] = ['name' => $name, 'status' => $default];
+                    }
+                }
+            }
+        }
+        return $resource;
+    }
+
     private function changes(array $resources): array {
         $changed = [];
         foreach ($resources as $key => $resource) {
             if ($resource !== null && isset($this->config()['observed'][$key])
-                    && self::canonical($resource) !== self::canonical($this->config()['observed'][$key])) {
+                    && self::canonical(self::comparable($key, $resource))
+                        !== self::canonical(self::comparable($key, $this->config()['observed'][$key]))) {
                 $changed[] = $key;
             }
         }
@@ -410,6 +444,8 @@ class Notifications {
                 'description' => 'Isolated test fixture managed by Zabbix Talk.']))['hostids'][0];
             $item = self::ok(API::Item()->create(['hostid' => $host, 'name' => 'TEST Zabbix Talk signal',
                 'key_' => 'zabbix.talk.test', 'type' => ITEM_TYPE_TRAPPER, 'value_type' => ITEM_VALUE_TYPE_UINT64,
+                // history.push checks the HTTP client IP; 7.4 also checks the local frontend connection.
+                'trapper_hosts' => implode(',', array_unique(['127.0.0.1', '::1', CWebUser::getIp()])),
                 'history' => '1d', 'trends' => '0']))['itemids'][0];
             $severity = max($config['severities']);
             $trigger = self::ok(API::Trigger()->create(['description' => 'TEST Zabbix Talk - PROBLEM controllato',
