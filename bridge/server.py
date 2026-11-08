@@ -608,25 +608,28 @@ class Bridge:
         if match and match[1] and match[1].lower() != current['bot']['username'].lower():
             return
         original = message.get('reply_to_message', {})
+        # Ordinary supergroup replies can carry a thread ID without belonging to a forum topic.
+        thread = str(message.get('message_thread_id') or '') if message.get('is_topic_message') else ''
+        original_thread = str(original.get('message_thread_id') or '') if original.get('is_topic_message') else ''
         minutes = int(match[2]) * {'m': 1, 'h': 60, 'd': 1440}[match[3]] if match else 0
         with self.receipts() as db:
             row = db.execute('SELECT ack_key FROM receipts WHERE kind=? AND chat_id=? AND thread_id=? AND message_id=?',
-                             ('problem', str(message.get('chat', {}).get('id')), str(message.get('message_thread_id') or ''),
+                             ('problem', str(message.get('chat', {}).get('id')), thread,
                               original.get('message_id'))).fetchone()
         if (not row or not row[0] or not 1 <= minutes <= 43200 or message.get('sender_chat')
                 or message.get('external_reply') or message.get('chat', {}).get('id') != original.get('chat', {}).get('id')
-                or str(message.get('message_thread_id') or '') != str(original.get('message_thread_id') or '')):
+                or thread != original_thread):
             result = ('Rispondi al PROBLEM originale dal tuo account con /snooze@' + current['bot']['username']
                       + ' 45m (oppure 3h, 2d). Durata: da 1 minuto a 30 giorni.')
         else:
             result = self.callback({'id': 'msg-' + str(message['chat']['id']) + '-' + str(message['message_id']),
                                     'data': 'snz:' + row[0] + ':' + str(minutes), 'from': message.get('from', {}),
-                                    'message': original, '_command': True}, token)
+                                    'message': dict(original, message_thread_id=original_thread), '_command': True}, token)
         # Command feedback is explicit user interaction, never an incident reminder.
         params = {'chat_id': message['chat']['id'], 'text': result,
                   'reply_parameters': {'message_id': message['message_id']}}
-        if message.get('message_thread_id'):
-            params['message_thread_id'] = message['message_thread_id']
+        if thread:
+            params['message_thread_id'] = int(thread)
         self.api(token, 'sendMessage', params)
 
     def expire_snoozes(self):
