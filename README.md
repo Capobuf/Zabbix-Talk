@@ -2,7 +2,9 @@
 
 Zabbix Talk integra un modulo di configurazione nel frontend Zabbix e un bridge Telegram locale per notifiche e operazioni sugli incidenti.
 
-Le slice #1–#7 e lo stile Telegram #16 sono integrate. La slice [#7](https://github.com/Capobuf/Zabbix-Talk/issues/7) aggiunge lo snooze condiviso del singolo incidente nella destinazione Telegram. Il comportamento corrente è descritto in fondo; le sezioni delle slice precedenti documentano anche le rispettive prove storiche.
+Le slice #1–#8 e lo stile Telegram #16 sono integrate. La slice [#7](https://github.com/Capobuf/Zabbix-Talk/issues/7) aggiunge lo snooze condiviso del singolo incidente nella destinazione Telegram. Il comportamento corrente è descritto in fondo; le sezioni delle slice precedenti documentano anche le rispettive prove storiche.
+
+La [slice #8](https://github.com/Capobuf/Zabbix-Talk/issues/8) aggiunge esclusione e riattivazione del singolo trigger, conferma Telegram, motivazione tramite campo di risposta nativo e pagina **Controlli esclusi**.
 
 ## Riferimenti di progetto
 
@@ -19,6 +21,7 @@ Il modulo usa una navigazione orizzontale nativa, senza nuove dipendenze:
 - **Panoramica**: stato essenziale di bridge, bot, destinazioni, conflitti e notifiche, con collegamenti alle configurazioni.
 - **Destinazioni**: tabella delle destinazioni registrate, collegamento tramite comando Telegram, creazione esplicita di topic, associazioni dei gruppi host e scelte per i conflitti. I gruppi non associati e l’anteprima degli altri host sono espandibili.
 - **Notifiche**: severità, politica corrente 24/7 e stato reale delle risorse gestite. Gli identificativi tecnici sono espandibili.
+- **Controlli esclusi**: ricerca dei trigger esclusi da Telegram, stato riletto da Zabbix e riattivazione con conferma.
 - **Impostazioni**: token del bot, verifica della connessione e diagnostica del bridge.
 - **Collaudi**: destinazione selezionata e prove distinte Telegram, Webhook ed evento PROBLEM/RECOVERY; eventi, ricevute e audit sono nei dettagli avanzati.
 
@@ -45,7 +48,7 @@ Verificati server **8.0.0**, revisione **c81e276e505** (build del 4 novembre 202
 - Corretto anche un difetto Telegram preesistente emerso nel collaudo: lo snooze personalizzato distingue i thread ordinari dai topic tramite `is_topic_message`, conservando i controlli su account, destinazione e messaggio originale. Superati anche i **46 test** dell’anteprima locale.
 - Nel gruppo Telegram di prova verificato **test-bot**: Webhook separato → messaggio **17**; host isolato **10818**, item **75495**, trigger **34604**, PROBLEM **14102** → Action **15** → bridge → messaggio **14**. ACK reale dell’operatore (**acknowledgeid 25**, `action=6`, utente tecnico 5) confermato in Zabbix e sul messaggio; snooze reale di **1 minuto** dopo la correzione; RECOVERY **14103** confermato sullo stesso messaggio **14**, senza nuovo messaggio durante lo snooze. Evento lasciato risolto. Il primo tentativo, contemporaneo alla rotazione del token durante il salvataggio, è stato rifiutato; riuscito dopo la fine dei salvataggi.
 
-Il collaudo conserva l’anteprima locale non pubblicata della #8 (ruolo Admin e sei metodi API già presenti); questa patch non amplia i permessi. La nuova registrazione del widget **Scatter plot**, modulo **35**, accesso **0**, è stata accettata puntualmente nello snapshot con autorizzazione dell’operatore, senza ignorare genericamente nuovi moduli.
+Il collaudo della compatibilità 8.0 ha usato l’anteprima locale della #8 (ruolo Admin e sei metodi API già presenti); il fix di compatibilità non ha ampliato i permessi. La nuova registrazione del widget **Scatter plot**, modulo **35**, accesso **0**, è stata accettata puntualmente nello snapshot con autorizzazione dell’operatore, senza ignorare genericamente nuovi moduli.
 
 Limiti: prova live in un supergruppo senza topic; topic e promemoria a scadenza verificati con API controllate. Nessun nuovo collaudo reale su 7.4.
 
@@ -104,7 +107,7 @@ git pull --ff-only
 sudo ./scripts/install.sh /usr/share/zabbix/ui super
 ```
 
-Il branch di sviluppo della slice #7 è `issue/7-telegram-snooze`. Dopo il merge usa `main` per gli aggiornamenti. Non sovrascrivere modifiche locali. Per modifiche al solo Python basta `sudo systemctl restart zabbix-talk`; per PHP aggiorna la pagina. Quando cambiano unità systemd, socket o permessi, riesegui l’installer. La VM usa il codice del checkout, senza build, container o dipendenze Python esterne.
+Il branch di sviluppo della slice #8 è `issue/8-trigger-exclusions`. Dopo il merge usa `main` per gli aggiornamenti. Non sovrascrivere modifiche locali. Per modifiche al solo Python basta `sudo systemctl restart zabbix-talk`; per PHP aggiorna la pagina. Quando cambiano unità systemd, socket o permessi, riesegui l’installer. La VM usa il codice del checkout, senza build, container o dipendenze Python esterne.
 
 ```bash
 systemctl status zabbix-talk --no-pager
@@ -381,3 +384,39 @@ Correzione dell’anteprima: aggiunta la durata esplicita alla conferma Telegram
 
 
 Al termine della revisione è stato generato il RECOVERY nativo **9936** dalla pagina **Collaudi**, mentre lo snooze di otto ore era ancora attivo: Telegram ha confermato la modifica dello stesso messaggio **6**, senza nuovo messaggio di ripristino (`recovery_message_id` assente). Lo snooze risulta **resolved**, senza promemoria previsto; il polling non mostra errori. Il PROBLEM di prova **9733** è risolto e l’host isolato rimane disponibile. Prima della pubblicazione sono stati confermati i 38 test del bridge e la sintassi dei due file PHP modificati.
+
+
+### Esclusione e riattivazione del singolo controllo — slice #8
+
+Salva **Destinazioni e notifiche** per aggiornare le risorse gestite e abilitare le operazioni sui controlli. Il setup riusa lo stesso ruolo e account tecnico: `trigger.update` richiede il tipo **Admin** e scrittura sui gruppi host autorizzati. Le sole API consentite sono `host.get`, `hostgroup.get`, `event.get`, `event.acknowledge`, `trigger.get`, `trigger.update`; le azioni di ruolo sono limitate ad ACK e commento. Il frontend dell’account resta disabilitato. Per gruppi precedentemente associati e poi rimossi si conserva soltanto la lettura necessaria ai RECOVERY. Non viene introdotto un ruolo Telegram supplementare.
+
+1. Nel PROBLEM originale premi **Escludi questo problema**. La conferma mostra host, nome del controllo ed effetto; nessun ID tecnico o comando nel testo principale. Il controllo sarà disattivato in Zabbix per tutti i canali. Gli item e gli altri trigger non vengono modificati.
+2. Puoi premere **Escludi controllo**, **Annulla** oppure **Aggiungi un motivo (facoltativo)**. Quest’ultimo apre il campo di risposta nativo Telegram: scrivi normalmente, senza comandi. Il bot usa `ForceReply` per l’operatore che ha premuto il pulsante, accetta da 1 a 500 caratteri e riporta il motivo nella conferma finale del messaggio originale. Scrivere il motivo non applica ancora l’esclusione. Richiesta del motivo e conferma scadono dopo cinque minuti; conferma, identità personale, membership e routing vengono verificati nuovamente prima della modifica.
+3. Dopo `trigger.update`, il bridge rilegge stato e identità del trigger. Solo uno stato disabilitato verificato viene presentato come esclusione riuscita. Il messaggio mostra **Controllo escluso in Zabbix** e il pulsante **Riattiva questo controllo**; la riattivazione richiede una nuova conferma. Può restare disponibile anche dopo un RECOVERY, senza ridisegnare l’incidente come aperto.
+4. In **Zabbix Talk → Controlli esclusi** (`zabbix.php?action=zabbix.talk.exclusions`) un Super Admin può cercare per host, controllo, ID o operatore e premere **Riattiva**. La conferma nativa precede il POST protetto da CSRF. Stato e identità vengono riletti prima e dopo la modifica. Le riattivazioni frontend registrano l’utente Zabbix effettivo, senza attribuirle a una persona Telegram.
+
+L’identità parte dall’evento Zabbix, non dal testo del pulsante. Sono verificati trigger concreto, host unico, item appartenenti allo stesso host e, per LLD, prototipo di origine e discovery rule sullo stesso host. Il bridge modifica soltanto `triggerid` e `status`: nessun aggiornamento a template, prototipi, item o discovery rule. Trigger su template, scope multi-host, discovery persa, permessi insufficienti e identità modificata sono rifiutati esplicitamente. Un controllo già disabilitato esternamente non viene adottato come esclusione gestita.
+
+Esclusioni e audit persistono nello SQLite privato esistente. L’audit registra operazione, identità Telegram reale o utente Zabbix, istanti, destinazione, messaggio, evento, host, trigger, motivo, stato prima/dopo ed esito. **Collaudi → Diagnostica avanzata → Operazioni Telegram** mostra le ultime otto operazioni, comprese le riattivazioni frontend; lo storico completo resta nel database privato. Le conferme e le risposte duplicate non ripetono la modifica. Le richieste in corso o incerte sopravvivono al riavvio e bloccano nuovi tentativi automatici: verificare stato e audit nativi prima di intervenire dalla configurazione Zabbix. Un aggiornamento Telegram fallito viene segnalato separatamente da una modifica Zabbix riuscita.
+
+Limiti: l’esclusione non chiude artificialmente un evento aperto. La normale rediscovery dello stesso trigger LLD conserva la disabilitazione manuale; cancellazione e ricreazione producono invece una nuova identità, che non viene esclusa automaticamente. Modifiche a espressione, item, origine o host bloccano la riattivazione gestita; una disabilitazione effettuata dalla discovery non viene annullata automaticamente. Se il routing o i diritti di scrittura sono stati rimossi, il frontend segnala il limite: occorre ripristinare l’associazione oppure intervenire nella configurazione nativa Zabbix. Il bridge non impone periodicamente lo stato e non crea un secondo motore di monitoraggio.
+
+#### Anteprima sulla VM — 29 ottobre 2026
+
+- Salvato il setup dalla pagina reale, riutilizzando ruolo 6, gruppo utenti 16, Media Type 110, utente 5, Action 15 e macro 4. Verificati tipo Admin, lista delle sei API, sole azioni ACK/commento, frontend disabilitato e scrittura sui gruppi di collaudo 25 e 27.
+- Creato l’host isolato **10817**, `Zabbix-Talk-LLD-Test-8`, senza modificare la fixture precedente 10816. La discovery trapper **75444** e il prototipo **34580** hanno generato i controlli porta 13 (**34581**) e porta 14 (**34582**), con item **75446** e **75447**. PROBLEM nativi **10266** e **10267** → Rich Message **7** e **8** nel supergruppo **test-bot**, senza topic.
+- Collaudo API locale, distinto da un click umano: disabilitato soltanto 34581 tramite il codice del bridge e il suo service account. Successiva discovery elaborata con creazione della porta 15 (**34583**, item **75448**): 34581 ancora disabilitato, controlli 34582/34583 e item ancora abilitati. Riattivato 34581 dalla pagina reale, con conferma accettata e audit dell’utente Zabbix; verificata anche l’annullabilità della conferma. Il collaudo locale è identificato come tale nell’audit.
+- L’operatore **CeSa (@capobuf), Telegram ID 6763365**, ha realmente richiesto e confermato da Telegram l’esclusione della porta 14, trigger **34582**, evento **10267**. Stato disabilitato riletto in Zabbix e riga corrispondente verificata nella pagina reale. Durante la revisione il testo della conferma è stato semplificato e il motivo facoltativo è stato spostato nel campo di risposta nativo.
+- Pagina controllata a 1366 e 1024 px senza scorrimento orizzontale della pagina. Verificati ricerca con risultato e stato vuoto, rifiuto del POST senza CSRF prima del bridge e assenza dei dati del controllo per accessi anonimi. Dopo la correzione della conferma frontend non sono stati osservati errori JavaScript nel flusso di riattivazione.
+- **44 test del bridge superati**: comprendono conferme vincolate all’operatore, membership, scope, stato cambiato, scadenza, duplicati, persistenza, errore incerto, riattivazione dopo RECOVERY e motivo scritto in risposta con controllo dell’identità. Il campo del motivo e la riattivazione Telegram dopo RECOVERY sono verificati con API controllate; la prova personale del nuovo campo del motivo resta da confermare. Sintassi PHP verificata sui file modificati.
+
+Riferimenti ufficiali: [trigger.update e tipo Admin](https://www.zabbix.com/documentation/7.4/en/manual/api/reference/trigger/update), [trigger.get e dati LLD](https://www.zabbix.com/documentation/7.4/en/manual/api/reference/trigger/get), [ForceReply](https://core.telegram.org/bots/api#forcereply).
+
+Correzione del motivo durante la revisione: una risposta reale nello stesso supergruppo senza topic conteneva `message_thread_id` del messaggio originale. Il confronto diretto lo interpretava erroneamente come un altro topic. Il flusso ora distingue i topic tramite `is_topic_message`, conserva la destinazione registrata per la conferma e non passa un thread ordinario ai parametri di invio per forum. Superati i due test mirati: risposta in un thread ordinario accettata fino alla conferma finale; identità differente, invio anonimo e topic forum diverso ancora rifiutati. La verifica dal telefono della correzione resta da ripetere.
+
+
+#### Verifica prima della pubblicazione — 8 novembre 2026
+
+La versione pubblicata include il fix di compatibilità Zabbix **8.0.0** già su `main`. Superati **46 test del bridge**, regressioni PHP sulle notifiche e lint dei PHP della slice. Restano valide come prove storiche 7.4 le esclusioni reali, la rediscovery LLD e la riattivazione frontend del 29 ottobre descritte sopra.
+
+Durante il collaudo su 8.0.0, l’operatore ha usato realmente il campo del motivo sul messaggio **14**, evento **14102**: risposta personale ricevuta nello stesso supergruppo senza topic, motivo riportato nella conferma finale e richiesta poi annullata senza cambiare il trigger. Questo completa la verifica dal telefono della correzione dei thread ordinari. La persistenza del motivo dopo conferma e la riattivazione Telegram dopo RECOVERY restano verificate con API controllate. Il PROBLEM 14102 è stato risolto dal RECOVERY **14103**; nessun nuovo evento generato per la pubblicazione.
