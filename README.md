@@ -35,6 +35,22 @@ Anteprima approvata il 28 ottobre 2026. Verificati sul frontend reale il salvata
 - `scripts/`: installazione/aggiornamento idempotente e rollback sulla VM.
 - `systemd/`: servizio con utenza dedicata e privilegi minimi.
 
+## Verifica Zabbix 8.0.0 — 8 novembre 2026
+
+Verificati server **8.0.0**, revisione **c81e276e505** (build del 4 novembre 2026, pacchetto `2:8.0.0-1+ubuntu24.04`), frontend/API **8.0.0** e PHP **8.3.6** sia Apache sia CLI. Non è una build `devel`; questa prova non certifica altre versioni 8.x. Le prove 7.4.15 riportate sotto restano storiche.
+
+- Il confronto delle risorse normalizza in memoria, su entrambi i lati, soltanto le aggiunte verificate in 8.0: modalità proxy migrate a **0**, redirect, dispositivi e nuove voci UI/azioni del ruolo. I valori già presenti restano confrontati; una GET non risalva `observed`.
+- I nuovi trapper di collaudo ammettono esplicitamente l’IP HTTP nativo dell’operatore e i loopback locali, necessari anche al controllo dell’origine in 7.4. Con client IP `172.16.100.7`, verificati il rifiuto del default `{$TRAPPER.ALLOWED_HOSTS}` (`127.0.0.1,::1`) e l’accettazione della lista stretta. La fixture preesistente, migrata a `0.0.0.0/0,::/0`, è stata conservata con il suo storico; nessuna macro globale modificata.
+- Superati `php tests/notifications.php` (snapshot 7.4/8.0, permessi e campi protetti, payload fixture), lint dei PHP modificati e **39 test** Python (i 38 preesistenti più la regressione snooze). Navigazione, CSRF e aggiornamento parziale della pagina verificati senza errori PHP/JS osservati. Due salvataggi riusano tutti gli ID; una vera modifica dell’Action blocca ancora il salvataggio.
+- Corretto anche un difetto Telegram preesistente emerso nel collaudo: lo snooze personalizzato distingue i thread ordinari dai topic tramite `is_topic_message`, conservando i controlli su account, destinazione e messaggio originale. Superati anche i **46 test** dell’anteprima locale.
+- Nel gruppo Telegram di prova verificato **test-bot**: Webhook separato → messaggio **17**; host isolato **10818**, item **75495**, trigger **34604**, PROBLEM **14102** → Action **15** → bridge → messaggio **14**. ACK reale dell’operatore (**acknowledgeid 25**, `action=6`, utente tecnico 5) confermato in Zabbix e sul messaggio; snooze reale di **1 minuto** dopo la correzione; RECOVERY **14103** confermato sullo stesso messaggio **14**, senza nuovo messaggio durante lo snooze. Evento lasciato risolto. Il primo tentativo, contemporaneo alla rotazione del token durante il salvataggio, è stato rifiutato; riuscito dopo la fine dei salvataggi.
+
+Il collaudo conserva l’anteprima locale non pubblicata della #8 (ruolo Admin e sei metodi API già presenti); questa patch non amplia i permessi. La nuova registrazione del widget **Scatter plot**, modulo **35**, accesso **0**, è stata accettata puntualmente nello snapshot con autorizzazione dell’operatore, senza ignorare genericamente nuovi moduli.
+
+Limiti: prova live in un supergruppo senza topic; topic e promemoria a scadenza verificati con API controllate. Nessun nuovo collaudo reale su 7.4.
+
+Sorgenti verificati: [migrazioni 8.0.0](https://github.com/zabbix/zabbix/blob/8.0.0/src/libs/zbxdbupgrade/dbupgrade_7050.c), [ruoli 8.0.0](https://github.com/zabbix/zabbix/blob/8.0.0/ui/include/classes/api/services/CRole.php), [history.push 8.0.0](https://github.com/zabbix/zabbix/blob/8.0.0/src/zabbix_server/trapper/trapper_history_push.c), [messaggi Telegram e topic](https://core.telegram.org/bots/api#message).
+
 ## Installazione e sviluppo
 
 La VM Zabbix è anche l'ambiente di sviluppo. Rilevamenti del 26 ottobre 2026:
