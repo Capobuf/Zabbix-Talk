@@ -5,6 +5,7 @@ namespace Modules\ZabbixTalk;
 use API;
 use CSessionHelper;
 use CSettingsHelper;
+use CRoleHelper;
 use CWebUser;
 use CZabbixServer;
 use RuntimeException;
@@ -156,6 +157,8 @@ class Notifications {
                 : _('Action PROBLEM/RECOVERY attiva e risorse sincronizzate.')) : _('Action disabilitata.');
             $message .= !empty($telegram['ack_enabled']) ? _(' ACK da Telegram abilitati.')
                 : _(' Salva nuovamente le destinazioni per abilitare gli ACK da Telegram.');
+            $message .= !empty($telegram['exclusions_enabled']) ? _(' Esclusione e riattivazione abilitate.')
+                : _(' Salva nuovamente le destinazioni per abilitare esclusione e riattivazione dei trigger.');
         }
         $resource_states = [];
         foreach ($resources as $key => $resource) {
@@ -254,7 +257,7 @@ class Notifications {
         foreach (self::ok(API::HostGroup()->get(['output' => ['groupid', 'name']])) as $group) {
             foreach ($routes as $route) {
                 if ($group['groupid'] == $route['groupid'] || str_starts_with($group['name'], $route['group_name'].'/')) {
-                    $rights[$group['groupid']] = ['id' => $group['groupid'], 'permission' => PERM_READ];
+                    $rights[$group['groupid']] = ['id' => $group['groupid'], 'permission' => PERM_READ_WRITE];
                 }
             }
         }
@@ -274,18 +277,22 @@ class Notifications {
                 'value' => $channel['key'], 'description' => 'Managed by Zabbix Talk. Local Webhook authentication.'
             ], $existing, $config);
             $this->put('role', API::Role(), 'roleid', [
-                'name' => 'Zabbix Talk - Notify', 'type' => USER_TYPE_ZABBIX_USER,
-                'rules' => ['ui.default_access' => 0, 'ui' => [['name' => 'monitoring.problems', 'status' => 1]],
+                'name' => 'Zabbix Talk - Notify', 'type' => USER_TYPE_ZABBIX_ADMIN,
+                'rules' => ['ui.default_access' => 0, 'ui' => array_map(static fn($name) => [
+                    'name' => substr($name, strlen('ui.')), 'status' => (int) ($name === CRoleHelper::UI_MONITORING_PROBLEMS)
+                ], CRoleHelper::getUiElementsByUserType(USER_TYPE_ZABBIX_ADMIN)),
                     'api.access' => 1, 'api.mode' => ZBX_ROLE_RULE_API_MODE_ALLOW,
-                    'api' => ['host.get', 'hostgroup.get', 'event.get', 'event.acknowledge'],
-                    'actions.default_access' => 0, 'actions' => [
-                        ['name' => 'acknowledge_problems', 'status' => 1],
-                        ['name' => 'add_problem_comments', 'status' => 1]
-                    ], 'modules.default_access' => 0]
+                    'api' => ['host.get', 'hostgroup.get', 'event.get', 'event.acknowledge', 'trigger.get', 'trigger.update'],
+                    'actions.default_access' => 0, 'actions' => array_map(static fn($name) => [
+                        'name' => substr($name, strlen('actions.')), 'status' => (int) in_array($name,
+                            [CRoleHelper::ACTIONS_ACKNOWLEDGE_PROBLEMS, CRoleHelper::ACTIONS_ADD_PROBLEM_COMMENTS])
+                    ], CRoleHelper::getActionsByUserType(USER_TYPE_ZABBIX_ADMIN)), 'modules.default_access' => 0]
             ], $existing, $config);
             // Keep previously granted read scope so native RECOVERY can reach the original recipient after rerouting.
             foreach ($existing['group']['hostgroup_rights'] ?? [] as $right) {
-                if (!in_array($right['id'], array_column($rights, 'id'))) { $rights[] = $right; }
+                if (!in_array($right['id'], array_column($rights, 'id'))) {
+                    $rights[] = ['id' => $right['id'], 'permission' => PERM_READ];
+                }
             }
             $this->put('group', API::UserGroup(), 'usrgrpid', [
                 'name' => 'Zabbix Talk - Notify', 'gui_access' => GROUP_GUI_ACCESS_DISABLED,
@@ -361,7 +368,7 @@ class Notifications {
         $path = rtrim(dirname($_SERVER['SCRIPT_NAME']), '/').'/api_jsonrpc.php';
         BridgeClient::request('/routing', ['routes' => $routes, 'choices' => (object) $choices,
             'api_url' => 'http://127.0.0.1'.$path, 'api_token' => $this->routing_token,
-            'revision' => $this->routing_revision, 'ack_enabled' => true]);
+            'revision' => $this->routing_revision, 'ack_enabled' => true, 'exclusions_enabled' => true]);
         return $message;
     }
 

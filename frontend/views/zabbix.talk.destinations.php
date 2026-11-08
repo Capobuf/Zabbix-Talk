@@ -123,7 +123,8 @@ $notifications_panel->addItem($section(_('Politica notifiche'), new CFormGrid([
     new CLabel(_('Severità abilitate')), new CFormField((new CCheckBoxList('severities'))
         ->setOptions($options)->setChecked($data['severities'])->setColumns(3)),
     new CLabel(_('Ripristino')), new CFormField(_('Alta e Disastro: aggiorna il messaggio e invia il ripristino. Altre severità: aggiorna soltanto il messaggio.')),
-    new CLabel(_('Riconoscimento')), new CFormField(_('ACK nativo dai nuovi messaggi PROBLEM, disponibile ai membri attuali dei gruppi associati.'))
+    new CLabel(_('Riconoscimento')), new CFormField(_('ACK nativo dai nuovi messaggi PROBLEM, disponibile ai membri attuali dei gruppi associati.')),
+    new CLabel(_('Esclusione dei controlli')), new CFormField(_('I membri possono disabilitare e riattivare il singolo trigger, dopo conferma. L’esclusione vale per tutti i canali Zabbix.'))
 ])));
 $resources = (new CTableInfo())->setHeader([_('Risorsa gestita'), _('Stato')]);
 foreach (['media' => _('Media Type Webhook'), 'action' => _('Action PROBLEM/RECOVERY'), 'user' => _('Destinatario tecnico'),
@@ -147,6 +148,7 @@ $form->addItem((new CDiv([
     new CTag('p', true, _('Il salvataggio applica insieme associazioni, scelte per host e severità, aggiornando le risorse Zabbix gestite.')),
     (new CCheckBox('confirm', '1'))->setLabel(_('Confermo l’aggiornamento delle risorse e l’attivazione delle notifiche. Senza associazioni l’Action viene disabilitata.')),
     new CTag('p', true, _('Per gli ACK il bot deve essere amministratore in ogni gruppo associato.')),
+    new CTag('p', true, _('Esclusione e riattivazione richiedono l’account tecnico esistente di tipo Admin, API limitate e scrittura sui soli gruppi associati. Il frontend dell’account resta disabilitato.')),
     makeFormFooter(new CSubmitButton(_('Salva destinazioni e notifiche'), 'operation', 'save')),
     (new CSpan())->setId('talk-unsaved')->setAttribute('role', 'status')
 ]))->addClass('talk-save'));

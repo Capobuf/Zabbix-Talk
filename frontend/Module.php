@@ -17,7 +17,7 @@ class Module extends CModule {
             ->add(
                 (new CMenuItem(_('Zabbix Talk')))
                     ->setAction('zabbix.talk.overview')
-                    ->setAliases(['zabbix.talk.destinations'])
+                    ->setAliases(['zabbix.talk.destinations', 'zabbix.talk.exclusions'])
             );
     }
 }
