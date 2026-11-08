@@ -39,6 +39,9 @@ class TelegramFlowTest(unittest.TestCase):
             if params['user_id'] != 123456 and self.actor_status is not None:
                 return {'status': self.actor_status}
             return {'status': self.member_status}
+        if method == 'sendMessage' and params.get('reply_markup', {}).get('force_reply'):
+            self.next_message += 1
+            return {'message_id': self.next_message}
         if method in ('answerCallbackQuery', 'sendMessage'):
             return True
         if method == 'editMessageText' and self.deleted:
@@ -780,6 +783,200 @@ class TelegramFlowTest(unittest.TestCase):
         self.assertIn('Snooze di 1 minuto', self.calls[-1][1]['text'])
         self.assertNotIn('message_thread_id', self.calls[-1][1])
         self.assertFalse(any(method == 'event.acknowledge' for method, _ in self.zabbix_calls))
+
+    def exclusion_fixture(self, lld=False):
+        self.ack_fixture()
+        self.native_event['objectid'] = '88'
+        self.bridge.configure_routing(dict(self.bridge.state['routing'], exclusions_enabled=True))
+        self.native_trigger = {'triggerid': '88', 'description': 'Porta 13 < 1 Gbps',
+            'expression': 'last(/host/port[13])<1000', 'recovery_expression': '', 'templateid': '0',
+            'flags': '4' if lld else '0', 'status': '0',
+            'hosts': [{'hostid': '17', 'name': 'SW-EDGE', 'status': '0'}],
+            'items': [{'itemid': '1013', 'hostid': '17', 'flags': '4' if lld else '0'}],
+            'discoveryData': {'parent_triggerid': '80', 'status': '0', 'disable_source': '0'} if lld else [],
+            'discoveryRule': {'itemid': '1000', 'hostid': '17'} if lld else []}
+        api = self.bridge.zabbix_api
+        def zabbix(routing, method, params):
+            if method == 'trigger.get':
+                self.zabbix_calls.append((method, params))
+                self.assertTrue(params['editable'])
+                self.assertFalse(params['templated'])
+                return [json.loads(json.dumps(self.native_trigger))]
+            if method == 'trigger.update':
+                self.zabbix_calls.append((method, params))
+                self.assertEqual(set(params), {'triggerid', 'status'})
+                self.assertEqual(params['triggerid'], '88')
+                self.native_trigger['status'] = str(params['status'])
+                return {'triggerids': ['88']}
+            return api(routing, method, params)
+        mocked = patch.object(Bridge, 'zabbix_api', side_effect=zabbix)
+        mocked.start()
+        self.addCleanup(mocked.stop)
+
+    def control_query(self, action='exc', **changes):
+        return self.ack_query(**dict({'data': action + ':' + self.ack_data[4:]}, **changes))
+
+    def request_control_confirmation(self, action='exc', **changes):
+        self.bridge.callback(self.control_query(action, **changes), self.token)
+        edit = next(params for method, params in reversed(self.calls) if method == 'editMessageText')
+        self.assertIn('<b>SW-EDGE</b>', edit['rich_message']['html'])
+        self.assertIn('Porta 13 &lt; 1 Gbps', edit['rich_message']['html'])
+        self.assertNotIn('trigger ID', edit['rich_message']['html'])
+        self.assertNotIn('/escludi', edit['rich_message']['html'])
+        button = edit['reply_markup']['inline_keyboard'][0][0]
+        self.assertLessEqual(len(button['callback_data'].encode()), 64)
+        return self.control_query(action, id='confirm-' + changes.get('id', 'callback1'), data=button['callback_data'])
+
+    def test_exclude_requires_confirmation_and_native_single_trigger_state_then_ui_enable(self):
+        self.exclusion_fixture(lld=True)
+        query = self.request_control_confirmation()
+        self.assertEqual(self.native_trigger['status'], '0')
+        self.assertFalse(any(method == 'trigger.update' for method, _ in self.zabbix_calls))
+        self.bridge = Bridge(self.path)
+        self.bridge.callback(query, self.token)
+        self.assertEqual(self.native_trigger['status'], '1')
+        row = self.bridge.excluded_controls()['exclusions'][0]
+        self.assertTrue(row['can_enable'])
+        self.assertEqual(row['triggerid'], '88')
+        self.assertIn('Telegram ID 99', row['actor'])
+        audit = self.bridge.status()['audit'][0]
+        self.assertEqual(json.loads(audit['before_state'])['status'], '0')
+        self.assertEqual(json.loads(audit['after_state'])['status'], '1')
+        self.assertEqual(audit['status'], 'confirmed')
+        self.bridge.callback(query, self.token)
+        self.assertEqual(sum(method == 'trigger.update' for method, _ in self.zabbix_calls), 1)
+        self.bridge.enable_control('88', 'Zabbix: Admin (user ID 1)')
+        self.assertEqual(self.native_trigger['status'], '0')
+        self.assertEqual(self.bridge.excluded_controls()['exclusions'], [])
+        self.assertEqual(self.bridge.status()['audit'][0]['actor'], 'Zabbix: Admin (user ID 1)')
+        self.bridge.callback(query, self.token)
+        self.assertEqual(self.native_trigger['status'], '0')
+
+    def test_enable_from_telegram_after_recovery_keeps_resolved_presentation(self):
+        self.exclusion_fixture()
+        self.bridge.callback(self.request_control_confirmation(), self.token)
+        self.bridge.notify(self.recovery())
+        self.native_event['r_eventid'] = '100'
+        query = self.request_control_confirmation('ena', id='enable-request')
+        edit = next(params for method, params in reversed(self.calls) if method == 'editMessageText')
+        self.assertIn('Riattivare questo controllo?', edit['rich_message']['html'])
+        self.bridge.callback(query, self.token)
+        self.assertEqual(self.native_trigger['status'], '0')
+        edit = next(params for method, params in reversed(self.calls) if method == 'editMessageText')
+        self.assertIn('RISOLTO', edit['rich_message']['html'])
+        self.assertNotIn('Controllo escluso', edit['rich_message']['html'])
+        self.assertEqual(edit['reply_markup']['inline_keyboard'], [])
+
+    def test_exclusion_rechecks_member_scope_confirmation_actor_expiry_and_native_identity(self):
+        self.exclusion_fixture()
+        query = self.request_control_confirmation()
+        for index, changes in enumerate([
+                {'from': {'id': 100, 'first_name': 'Altro membro'}},
+                {'message': dict(query['message'], message_thread_id=18)}]):
+            self.bridge.callback(dict(query, **changes, id='forged-' + str(index)), self.token)
+        self.actor_status = 'left'
+        self.bridge.callback(dict(query, id='left'), self.token)
+        self.actor_status = 'member'
+        self.native_trigger['items'][0]['hostid'] = '18'
+        self.bridge.callback(dict(query, id='foreign-item'), self.token)
+        self.native_trigger['items'][0]['hostid'] = '17'
+        self.native_trigger['expression'] = 'last(/host/other)=1'
+        self.bridge.callback(dict(query, id='changed-expression'), self.token)
+        self.native_trigger['expression'] = 'last(/host/port[13])<1000'
+        with self.bridge.receipts() as db:
+            db.execute('UPDATE audit SET expires_at=0')
+        self.bridge.callback(dict(query, id='expired'), self.token)
+        self.assertEqual(self.native_trigger['status'], '0')
+        self.assertFalse(any(method == 'trigger.update' for method, _ in self.zabbix_calls))
+
+    def test_exclusion_blocks_templates_prototypes_multi_host_lost_lld_and_pre_disabled_trigger(self):
+        self.exclusion_fixture(lld=True)
+        variants = [dict(self.native_trigger, flags='2'),
+                    dict(self.native_trigger, hosts=[{'hostid': '17', 'name': 'Template', 'status': '3'}]),
+                    dict(self.native_trigger, hosts=self.native_trigger['hosts'] * 2),
+                    dict(self.native_trigger, discoveryData={}),
+                    dict(self.native_trigger, discoveryData={'parent_triggerid': '80', 'status': '1', 'disable_source': '1'}),
+                    dict(self.native_trigger, status='1')]
+        for index, trigger in enumerate(variants):
+            self.native_trigger = trigger
+            self.bridge.callback(self.control_query(id='unsafe-' + str(index)), self.token)
+        self.assertFalse(any(method == 'trigger.update' for method, _ in self.zabbix_calls))
+        self.assertEqual(self.bridge.excluded_controls()['exclusions'], [])
+
+    def test_exclusion_uncertain_write_survives_restart_without_retry_or_false_success(self):
+        self.exclusion_fixture()
+        query = self.request_control_confirmation()
+        api = self.bridge.zabbix_api
+        def uncertain(routing, method, params):
+            if method == 'trigger.update':
+                api(routing, method, params)
+                raise BridgeError('Risposta interrotta', uncertain=True)
+            return api(routing, method, params)
+        with patch.object(self.bridge, 'zabbix_api', side_effect=uncertain):
+            self.bridge.callback(query, self.token)
+        self.assertEqual(self.bridge.status()['audit'][0]['status'], 'uncertain')
+        self.bridge = Bridge(self.path)
+        self.bridge.callback(query, self.token)
+        self.assertFalse(self.bridge.excluded_controls()['exclusions'][0]['can_enable'])
+        self.assertEqual(sum(method == 'trigger.update' for method, _ in self.zabbix_calls), 1)
+
+    def test_exclusion_reason_from_reply_cancel_and_failed_telegram_edit_preserve_truth(self):
+        self.exclusion_fixture()
+        self.bridge.callback(self.control_query('why', id='reason-help'), self.token)
+        prompt = next(params for method, params in self.calls if method == 'sendMessage')
+        self.assertTrue(prompt['reply_markup']['force_reply'])
+        self.assertTrue(prompt['reply_markup']['selective'])
+        self.assertNotIn('/escludi', prompt['text'])
+        message = {'message_id': 80, 'text': 'cavo <guasto>', 'from': self.ack_query()['from'],
+                   'chat': {'id': -1001, 'type': 'supergroup'}, 'message_thread_id': 17, 'is_topic_message': True,
+                   'reply_to_message': {'message_id': self.next_message, 'from': {'id': 123456}}}
+        self.bridge.exclusion_reason_reply(dict(message, sender_chat={'id': -1001}), self.token)
+        self.bridge.exclusion_reason_reply(dict(message, message_id=81, **{'from': {'id': 100}}), self.token)
+        self.bridge.exclusion_reason_reply(dict(message, message_id=83, message_thread_id=18), self.token)
+        self.assertFalse(any(method == 'editMessageText' for method, _ in self.calls))
+        self.bridge = Bridge(self.path)
+        self.bridge.exclusion_reason_reply(dict(message, message_id=82), self.token)
+        edit = next(params for method, params in reversed(self.calls) if method == 'editMessageText')
+        self.assertIn('cavo &lt;guasto&gt;', edit['rich_message']['html'])
+        self.assertEqual(self.native_trigger['status'], '0')
+        before = len(self.calls)
+        self.bridge.exclusion_reason_reply(dict(message, message_id=82), self.token)
+        self.assertEqual(len(self.calls), before)
+        query = self.control_query(id='reason-confirm', data=edit['reply_markup']['inline_keyboard'][0][0]['callback_data'])
+        self.deleted = True
+        self.bridge.callback(query, self.token)
+        self.assertEqual(self.native_trigger['status'], '1')
+        self.assertEqual(self.bridge.status()['audit'][0]['status'], 'telegram_failed')
+        self.assertEqual(self.bridge.excluded_controls()['exclusions'][0]['reason'], 'cavo <guasto>')
+        self.deleted = False
+        enable = self.request_control_confirmation('ena', id='cancel-enable')
+        self.bridge.callback(dict(enable, id='cancelled', data=enable['data'].replace('ena:', 'can:', 1)), self.token)
+        self.bridge.callback(enable, self.token)
+        self.assertEqual(self.native_trigger['status'], '1')
+
+    def test_exclusion_reason_accepts_ordinary_reply_thread_without_changing_destination(self):
+        self.exclusion_fixture()
+        with self.bridge.receipts() as db:
+            db.execute("UPDATE receipts SET thread_id='' WHERE id='problem:99'")
+        self.bridge.state['routing']['routes'][0]['destination']['message_thread_id'] = None
+        original = dict(self.ack_query()['message'])
+        original.pop('message_thread_id')
+        self.bridge.callback(self.control_query('why', id='ordinary-reason', message=original), self.token)
+        prompt = next(params for method, params in self.calls if method == 'sendMessage')
+        self.assertNotIn('message_thread_id', prompt)
+        reply = {'message_id': 80, 'text': 'Cavo guasto', 'from': self.ack_query()['from'],
+                 'chat': original['chat'], 'message_thread_id': original['message_id'],
+                 'reply_to_message': {'message_id': self.next_message, 'from': {'id': 123456}}}
+        self.bridge.exclusion_reason_reply(reply, self.token)
+        edit = next(params for method, params in reversed(self.calls) if method == 'editMessageText')
+        self.assertIn('<b>Motivo:</b> Cavo guasto', edit['rich_message']['html'])
+        self.assertEqual(self.bridge.status()['audit'][0]['status'], 'awaiting_confirmation')
+        self.assertEqual(self.bridge.status()['audit'][0]['thread_id'], '')
+        self.assertEqual(self.native_trigger['status'], '0')
+        self.bridge.callback(self.control_query(id='ordinary-confirm', message=original,
+            data=edit['reply_markup']['inline_keyboard'][0][0]['callback_data']), self.token)
+        self.assertEqual(self.native_trigger['status'], '1')
+        self.assertEqual(self.bridge.excluded_controls()['exclusions'][0]['reason'], 'Cavo guasto')
 
 
 if __name__ == '__main__':
