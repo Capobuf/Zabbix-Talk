@@ -74,6 +74,10 @@ class Overview extends CController {
         foreach ($status['audit'] ?? [] as $entry) {
             $audit[] = zbx_date2str(DATE_TIME_FORMAT_SECONDS, $entry['created_at']).' · '.$entry['operation']
                 .' · eventid '.($entry['eventid'] ?: '—').' · '.$entry['actor']
+                .(!empty($entry['triggerid']) ? ' · trigger ID '.$entry['triggerid'].' · host ID '.$entry['hostid'] : '')
+                .(!empty($entry['before_state']) ? ' · stato '.(json_decode($entry['before_state'], true)['status'] ?? '?')
+                    .' → '.(json_decode($entry['after_state'] ?? '', true)['status'] ?? '?') : '')
+                .(!empty($entry['reason']) ? ' · motivo: '.$entry['reason'] : '')
                 .' · chat_id '.$entry['chat_id'].($entry['thread_id'] ? ' · topic '.$entry['thread_id'] : '')
                 .' · '.$entry['detail'];
         }
