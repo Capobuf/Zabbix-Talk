@@ -741,8 +741,8 @@ class TelegramFlowTest(unittest.TestCase):
         self.assertIn('/snooze@TestBot', self.calls[-1][1]['text'])
         self.assertEqual(self.bridge.status()['snoozes'], [])
         message = {'message_id': 80, 'text': '/snooze@TestBot 1m', 'from': self.ack_query()['from'],
-                   'chat': {'id': -1001, 'type': 'supergroup'}, 'message_thread_id': 17,
-                   'reply_to_message': self.ack_query()['message']}
+                   'chat': {'id': -1001, 'type': 'supergroup'}, 'message_thread_id': 17, 'is_topic_message': True,
+                   'reply_to_message': dict(self.ack_query()['message'], is_topic_message=True)}
         for changes in ({'text': '/snooze@TestBot 0m'}, {'text': '/snooze@TestBot 31d'},
                         {'sender_chat': {'id': -1001}}, {'message_thread_id': 18}, {'reply_to_message': {}}):
             self.bridge.snooze_command(dict(message, **changes), self.token)
@@ -754,6 +754,32 @@ class TelegramFlowTest(unittest.TestCase):
         self.bridge = Bridge(self.path)
         self.bridge.snooze_command(message, self.token)
         self.assertEqual(self.bridge.status()['snoozes'][0]['until_at'], deadline)
+
+    def test_custom_snooze_in_ordinary_reply_thread_preserves_destination(self):
+        self.ack_fixture()
+        self.actor_status = None
+        self.register()
+        self.actor_status = 'member'
+        routing = self.bridge.state['routing']
+        routes = [dict(routing['routes'][0], destination=self.bridge.state['destination']), routing['routes'][1]]
+        self.bridge.configure_routing(dict(routing, routes=routes))
+        self.native_event['eventid'] = '100'
+        receipt = self.bridge.notify(self.notification(eventid='100', routing_revision='v1'))
+        original = dict(self.ack_query()['message'], message_id=receipt['message_id'],
+                        message_thread_id=receipt['message_id'])
+        message = {'message_id': 80, 'text': '/snooze@TestBot 1m', 'from': self.ack_query()['from'],
+                   'chat': original['chat'], 'message_thread_id': receipt['message_id'], 'reply_to_message': original}
+        for forged in [dict(message, is_topic_message=True, message_thread_id=17),
+                       dict(message, reply_to_message=dict(original, is_topic_message=True, message_thread_id=17))]:
+            self.bridge.snooze_command(forged, self.token)
+            self.assertEqual(self.bridge.status()['snoozes'], [])
+        self.bridge.snooze_command(message, self.token)
+        snooze = self.bridge.status()['snoozes'][0]
+        self.assertEqual((snooze['eventid'], snooze['thread_id'], snooze['status']), ('100', '', 'active'))
+        self.assertAlmostEqual(snooze['until_at'], time.time() + 60, delta=2)
+        self.assertIn('Snooze di 1 minuto', self.calls[-1][1]['text'])
+        self.assertNotIn('message_thread_id', self.calls[-1][1])
+        self.assertFalse(any(method == 'event.acknowledge' for method, _ in self.zabbix_calls))
 
 
 if __name__ == '__main__':
