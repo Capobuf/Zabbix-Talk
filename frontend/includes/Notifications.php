@@ -113,11 +113,19 @@ class Notifications {
     }
 
     private function changes(array $resources): array {
+        $observed = $this->config()['observed'] ?? [];
+        $ids = array_column($observed['group']['hostgroup_rights'] ?? [], 'id');
+        if ($ids) {
+            // Zabbix drops the rights of deleted host groups: that is not an external change.
+            $alive = array_column(self::ok(API::HostGroup()->get(['output' => ['groupid'], 'groupids' => $ids])), 'groupid');
+            $observed['group']['hostgroup_rights'] = array_values(array_filter($observed['group']['hostgroup_rights'],
+                static fn($right) => in_array($right['id'], $alive)));
+        }
         $changed = [];
         foreach ($resources as $key => $resource) {
-            if ($resource !== null && isset($this->config()['observed'][$key])
+            if ($resource !== null && isset($observed[$key])
                     && self::canonical(self::comparable($key, $resource))
-                        !== self::canonical(self::comparable($key, $this->config()['observed'][$key]))) {
+                        !== self::canonical(self::comparable($key, $observed[$key]))) {
                 $changed[] = $key;
             }
         }
@@ -502,6 +510,13 @@ class Notifications {
 
     public function removeTest(): string {
         return $this->transaction(function () {
+            $config = $this->config();
+            $hostid = $config['fixture']['hostid'] ?? null;
+            if ($hostid !== null && !self::ok(API::Host()->get(['output' => ['hostid'], 'hostids' => [$hostid]]))) {
+                unset($config['fixture']);
+                $this->save($config);
+                return _('Host di prova già assente in Zabbix: riferimento rimosso. Per ripetere il collaudo crea un nuovo host di prova.');
+            }
             $fixture = $this->fixture();
             self::ok(API::Host()->delete([$fixture['hostid']]));
             $config = $this->config();

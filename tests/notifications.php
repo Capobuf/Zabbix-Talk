@@ -90,6 +90,12 @@ foreach ($mutations as $name => $mutate) {
     check($compare($new, $modified) !== [], '8.0 snapshot hid '.$name);
     check($compare($modified, $new) !== [], 'Existing value overwritten for '.$name);
 }
+$dropped = $new;
+$dropped['group']['hostgroup_rights'] = [];
+API::$groups = [];
+check($compare($old, $dropped) === [], 'Right of a deleted host group reported as external change.');
+API::$groups = null;
+check($compare($old, $dropped) !== [], 'Right removed from an existing host group was hidden.');
 
 class CWebUser {
     public static string $ip = '198.51.100.23';
@@ -100,12 +106,20 @@ class API {
         'groupid' => '25', 'severities' => ['2', '5']
     ]]];
     public static array $item;
+    public static ?array $groups = null;
+    public static function HostGroup() { return new class {
+        public function get($options) {
+            $ids = API::$groups === null ? $options['groupids'] : array_intersect($options['groupids'], API::$groups);
+            return array_map(static fn($id) => ['groupid' => $id], array_values($ids));
+        }
+    }; }
     public static function Module() { return new class {
         public function get($options) { return [API::$module]; }
         public function update($module) { API::$module = $module; return ['moduleids' => ['34']]; }
     }; }
     public static function Host() { return new class {
         public function create($payload) { return ['hostids' => ['10816']]; }
+        public function get($options) { return []; }
     }; }
     public static function Item() { return new class {
         public function create($payload) { API::$item = $payload; return ['itemids' => ['75434']]; }
@@ -138,4 +152,6 @@ unset(API::$module['config']['notifications']['fixture']);
 CWebUser::$ip = '127.0.0.1';
 (new FixtureNotifications())->prepareTest();
 check(API::$item['trapper_hosts'] === '127.0.0.1,::1', 'Loopback client was duplicated.');
-echo "OK: upgrade comparison, protected changes and fixture payload.\n";
+(new FixtureNotifications())->removeTest();
+check(!isset(API::$module['config']['notifications']['fixture']), 'Reference to a deleted fixture host was kept.');
+echo "OK: upgrade comparison, protected changes, deleted host groups and fixture lifecycle.\n";
