@@ -165,7 +165,8 @@ class Bridge:
             headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + routing['api_token']})
         try:
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            with opener.open(request, timeout=3) as response:
+            # Tolerates short database stalls; three routing reads plus Telegram stay within the 60 s Webhook timeout.
+            with opener.open(request, timeout=10) as response:
                 result = json.load(response)
             if not isinstance(result, dict):
                 raise ValueError
