@@ -311,8 +311,10 @@ class Notifications {
             $this->put('media', API::MediaType(), 'mediatypeid', [
                 'name' => 'Zabbix Talk - Webhook', 'type' => MEDIA_TYPE_WEBHOOK, 'status' => MEDIA_TYPE_STATUS_ACTIVE,
                 'description' => 'Managed by Zabbix Talk. Local authenticated PROBLEM/RECOVERY transport.',
-                'script' => file_get_contents(__DIR__.'/webhook.js'), 'timeout' => '30s',
-                'maxattempts' => 1, 'maxsessions' => 1, 'process_tags' => 0, 'show_event_menu' => 0,
+                'script' => file_get_contents(__DIR__.'/webhook.js'), 'timeout' => '60s',
+                // Safe to retry: bridge receipts return duplicates and block resends of unconfirmed Telegram sends.
+                'maxattempts' => 3, 'attempt_interval' => '30s',
+                'maxsessions' => 1, 'process_tags' => 0, 'show_event_menu' => 0,
                 'parameters' => $this->parameters($state['destination'], $state['bot']),
                 'message_templates' => []
             ], $existing, $config);

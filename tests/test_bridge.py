@@ -1,8 +1,10 @@
 import json
 import sqlite3
 import tempfile
+import threading
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -401,6 +403,36 @@ class TelegramFlowTest(unittest.TestCase):
             with self.assertRaisesRegex(BridgeError, 'API non raggiungibile'):
                 self.bridge.notify(self.notification(routing_revision='v1'))
         self.assertFalse(any(method == 'sendRichMessage' for method, _ in self.calls))
+
+    def test_routing_failure_leaves_no_receipt_so_media_type_retry_sends(self):
+        self.routing()
+        one = [{'groupid': '1', 'name': 'Client A'}]
+        with patch.object(self.bridge, 'host_groups', side_effect=[BridgeError('API non raggiungibile'), one]):
+            with self.assertRaisesRegex(BridgeError, 'API non raggiungibile'):
+                self.bridge.notify(self.notification(routing_revision='v1'))
+            self.assertFalse(self.bridge.notify(self.notification(routing_revision='v1'))['duplicate'])
+        self.assertEqual(sum(method == 'sendRichMessage' for method, _ in self.calls), 1)
+
+    def test_zabbix_api_tolerates_slow_frontend(self):
+        class Slow(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers['Content-Length']))
+                time.sleep(4)
+                body = b'{"jsonrpc":"2.0","result":[],"id":1}'
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(('127.0.0.1', 0), Slow)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        routing = {'api_url': f'http://127.0.0.1:{server.server_port}/api_jsonrpc.php', 'api_token': 'a' * 64}
+        self.assertEqual(self.bridge.zabbix_api(routing, 'hostgroup.get', {}), [])
 
     def test_topic_creation_permission_and_persistence(self):
         self.register()
